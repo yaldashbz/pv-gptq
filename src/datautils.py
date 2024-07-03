@@ -19,6 +19,27 @@ def set_seed(seed: Optional[int]):
     torch.random.manual_seed(seed)
 
 
+# for personal test
+def get_red_pajama_dataset(nsamples, seqlen, tokenizer, split='train'):
+    traindata = load_dataset("togethercomputer/RedPajama-Data-1T-Sample", split=split)
+    tokenizer.bos_token_id = 1
+    tokenizer.eos_token_id = 2
+    traindataset = []
+    for _ in trange(nsamples, desc="Making red_pajama calibration set", leave=False):
+        while True:
+            i = random.randint(0, len(traindata) - 1)
+            trainenc = tokenizer(traindata[i]["text"], return_tensors="pt")
+            if trainenc.input_ids.shape[1] > seqlen:
+                break
+        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        j = i + seqlen
+        inp = trainenc.input_ids[:, i:j]
+        attention_mask = torch.ones_like(inp)
+        traindataset.append({'input_ids':inp,'attention_mask': attention_mask})
+
+    return traindataset
+
+
 def get_red_pajama(nsamples, seqlen, tokenizer, eval_mode=False):
     print("Loading red_pajama from togethercomputer/RedPajama-Data-1T-Sample")
     assert not eval_mode, "Only train set is supported in RedPajama"

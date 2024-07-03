@@ -46,9 +46,10 @@ def dispatch_quantized_model(model):
 def get_model(
     model_path, load_quantized=None, dtype="auto", device_map=None, attn_implementation=None, trust_remote_code=False
 ):
+    token = os.getenv("HUGGINGFACE_TOKEN")
     if dtype == "auto":
         dtype = (
-            AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code).torch_dtype or "auto"
+            AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code, use_auth_token=token).torch_dtype or "auto"
         )  # force transformers 4.29.2 to follow the same rules as 4.30.x
     elif isinstance(dtype, str):
         dtype = getattr(torch, dtype)
@@ -67,6 +68,7 @@ def get_model(
             device_map=None if load_quantized else device_map,
             low_cpu_mem_usage=True,
             local_files_only=True,
+            use_auth_token=token,
             **model_kwargs,
         )
         if load_quantized:

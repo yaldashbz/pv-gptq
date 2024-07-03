@@ -20,14 +20,17 @@ from torch.distributed.fsdp import FullyShardedDataParallel, StateDictType, Full
 from tqdm.auto import tqdm
 
 from convert_legacy_model_format import load_quantized_model_with_old_pickle
-from src.aq import QuantizedWeight
+# from src.aq import QuantizedWeight
+from src.gptq import GPTQQuantizedWeight
 from src.aq_ops import IntCodes, master_rank_first, one_rank_at_a_time, is_signed
 from src.datautils import group_texts, split_long_texts, get_loaders, evaluate_perplexity
 from src.modelutils import get_model
-from src.pv_utils import infer_module_classes, create_dequantized_model, \
+from src.pv_utils import infer_module_classes, create_dequantized_gptq_model, \
     get_original_named_parameters_from_fsdp_module, split_quantized_weights_between_ranks, \
     YourQuantizedWeightIsInAnotherRank
 from src.pv_optimizer import StraightThroughAdamW
+
+from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
 
 try:
     import wandb
@@ -444,16 +447,27 @@ def prepare_training_dataset(args: argparse.Namespace, tokenizer: transformers.P
 
 
 def load_base_model(args: argparse.Namespace, device: torch.device) -> FullyShardedDataParallel:
-    base_model = get_model(
-        args.base_model, load_quantized=None, dtype=args.load_dtype, trust_remote_code=args.trust_remote_code,
-        attn_implementation=args.attn_implementation,
-    ).to(dtype=args.load_dtype if args.load_dtype != 'auto' else None)
+    # base_model = get_model(
+    #     args.base_model, load_quantized=None, dtype=args.load_dtype, trust_remote_code=args.trust_remote_code,
+    #     attn_implementation=args.attn_implementation,
+    # ).to(dtype=args.load_dtype if args.load_dtype != 'auto' else None)
+    # TODO: move to param
+    quantize_config = BaseQuantizeConfig(
+        bits=4,  # quantize model to 4-bit
+        group_size=128,  # it is recommended to set the value to 128
+        desc_act=False,  # set to False can significantly speed up inference but the perplexity may slightly bad
+    )
+    base_model = AutoGPTQForCausalLM.from_pretrained(args.base_model, quantize_config)
     base_model.train(False)
     for param in base_model.parameters():
         param.requires_grad = False
 
     base_model.config.use_cache = False
     transformer_block_types = infer_module_classes(base_model, args.block_type)
+    
+    # print(f'Before FSDP base wrapping - device {device}:,  rank: {torch.distributed.get_rank()}')
+
+    base_model = base_model.to(device)
     return FullyShardedDataParallel(
         base_model,
         auto_wrap_policy=lambda module, recurse, **_: recurse or isinstance(module, transformer_block_types),
@@ -462,16 +476,19 @@ def load_base_model(args: argparse.Namespace, device: torch.device) -> FullyShar
 
 
 def load_dequantized_model(args: argparse.Namespace, device: torch.device) -> Tuple[FullyShardedDataParallel, dict]:
-    if not args.monkeypatch_old_pickle:
-        quantized_model = get_model(
-            args.base_model, args.quantized_model, dtype=args.load_dtype, trust_remote_code=args.trust_remote_code,
-            attn_implementation=args.attn_implementation
-        ).to(args.master_dtype)  # master parameters
-    else:
-        quantized_model = load_quantized_model_with_old_pickle(
-            args.base_model, args.quantized_model, dtype=args.load_dtype, trust_remote_code=args.trust_remote_code,
-            attn_implementation=args.attn_implementation
-        ).to(args.master_dtype)
+    # if not args.monkeypatch_old_pickle:
+    #     quantized_model = get_model(
+    #         args.base_model, args.quantized_model, dtype=args.load_dtype, trust_remote_code=args.trust_remote_code,
+    #         attn_implementation=args.attn_implementation
+    #     ).to(args.master_dtype)  # master parameters
+    # else:
+    #     quantized_model = load_quantized_model_with_old_pickle(
+    #         args.base_model, args.quantized_model, dtype=args.load_dtype, trust_remote_code=args.trust_remote_code,
+    #         attn_implementation=args.attn_implementation
+    #     ).to(args.master_dtype)
+
+    quantized_model = AutoGPTQForCausalLM.from_quantized(args.quantized_model)
+
 
     quantized_model.config.use_cache = False
     quantized_model.train(True)  # note: HF gradient checkpoints do not work for some models without train(True); see
@@ -481,17 +498,17 @@ def load_dequantized_model(args: argparse.Namespace, device: torch.device) -> Tu
         quantized_model.enable_input_require_grads()
 
     # convert QuantizedModel state dict to make it compatible with FSDP
-    for name, module in quantized_model.named_modules():
-        if isinstance(module, QuantizedWeight):
-            assert module.codes is not None
-            if args.code_dtype is not None:
-                assert module.nbits_per_codebook <= torch.iinfo(args.code_dtype).bits - is_signed(args.code_dtype)
-                module.codes = nn.Parameter(module.codes.to(args.code_dtype), requires_grad=module.codes.requires_grad)
-            module.wrap_codes_for_fsdp_()
-            assert module.codes is None and isinstance(module.codes_storage, IntCodes)
-    assert any(isinstance(module, IntCodes) for module in quantized_model.modules())
+    # for name, module in quantized_model.named_modules():
+    #     if isinstance(module, QuantizedWeight):
+    #         assert module.codes is not None
+    #         if args.code_dtype is not None:
+    #             assert module.nbits_per_codebook <= torch.iinfo(args.code_dtype).bits - is_signed(args.code_dtype)
+    #             module.codes = nn.Parameter(module.codes.to(args.code_dtype), requires_grad=module.codes.requires_grad)
+    #         module.wrap_codes_for_fsdp_()
+    #         assert module.codes is None and isinstance(module.codes_storage, IntCodes)
+    # assert any(isinstance(module, IntCodes) for module in quantized_model.modules())
 
-    dequantized_model, named_quantized_params = create_dequantized_model(
+    dequantized_model, named_quantized_params = create_dequantized_gptq_model(
         quantized_model, dequantized_dtype=args.amp_dtype, reuse_non_quantized=True)
     del quantized_model
 
@@ -519,6 +536,9 @@ def load_dequantized_model(args: argparse.Namespace, device: torch.device) -> Tu
         if torch.distributed.get_rank() == 0:
             print(f"Not using FSDP native MixedPrecision; Local amp_dtype={args.amp_dtype}.")
 
+    # print(f'Before FSDP deq wrapping - device {device}:,  rank: {torch.distributed.get_rank()}')
+
+    dequantized_model = dequantized_model.to(device)
     fsdp_model = FullyShardedDataParallel(
         dequantized_model,
         auto_wrap_policy=lambda module, recurse, **_: recurse or isinstance(module, block_types_to_wrap),
@@ -658,7 +678,7 @@ def main():
     rank = torch.distributed.get_rank()
     world_size = torch.distributed.get_world_size()
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.cuda.set_device(rank)
 
     assert args.batch_size is not None, "please specify batch size"
     assert args.batch_size % world_size == 0
@@ -689,7 +709,7 @@ def main():
     if rank == 0:
         print(args)
 
-    tokenizer = transformers.AutoTokenizer.from_pretrained(args.base_model)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(args.base_model, token=os.getenv("HUGGINGFACE_TOKEN"))
     assert tokenizer.eos_token_id is not None
     tokenizer.pad_token = tokenizer.eos_token
 
@@ -707,10 +727,10 @@ def main():
         dataset, batch_size=args.microbatch_size, num_workers=args.num_workers, sampler=sampler,
         collate_fn=transformers.default_data_collator
     )
-    eval_datasets = {dataset_name: get_loaders(
-        dataset_name, seed=args.seed, model_path=args.base_model, seqlen=args.model_seqlen, eval_mode=True,
-        ) for dataset_name in args.eval_datasets
-    }
+    # eval_datasets = {dataset_name: get_loaders(
+    #     dataset_name, seed=args.seed, model_path=args.base_model, seqlen=args.model_seqlen, eval_mode=True,
+    #     ) for dataset_name in args.eval_datasets
+    # }
 
     with one_rank_at_a_time(local=True, group_size=args.limit_parallel_inits):
         base_model = load_base_model(args, device)
@@ -728,11 +748,13 @@ def main():
             named_quantized_params = split_quantized_weights_between_ranks(
                 named_quantized_params, verify_checksums=False)
         for quantized_weight in named_quantized_params.values():
-            if isinstance(quantized_weight, QuantizedWeight):
+            if isinstance(quantized_weight, GPTQQuantizedWeight):
                 quantized_weight.to(device)
             else:
                 assert isinstance(quantized_weight, YourQuantizedWeightIsInAnotherRank)
 
+    # named_dequantized_param is tensor
+    # named_quantized_param is GPTQQuantizedWeight
     optimizer = StraightThroughAdamW(
         named_dequantized_params=named_dequantized_params,
         named_quantized_params=named_quantized_params,
@@ -792,6 +814,8 @@ def main():
             metadata['microbatches_since_epoch_start'] += 1
             metadata['total_microbatches'] += 1
 
+            print('base model device: ', next(base_model.parameters()).device)
+            print('dequantized model device: ', next(dequantized_model.parameters()).device)
             batch = {k: v.to(device) for k, v in batch.items()}
             loss = compute_loss_on_batch(batch, base_model, dequantized_model, amp_dtype=args.amp_dtype)
 

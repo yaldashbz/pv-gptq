@@ -10,10 +10,12 @@ from typing import Tuple, Optional, Dict, List
 
 import torch
 import transformers
+import tqdm
 
 from torch import nn as nn
 
 from src.aq import QuantizedLinear, QuantizedWeight
+from src.gptq import GPTQQuantizedWeight
 
 
 def infer_module_classes(model: nn.Module, class_name: str) -> Tuple[type[nn.Module], ...]:
@@ -27,6 +29,71 @@ def infer_module_classes(model: nn.Module, class_name: str) -> Tuple[type[nn.Mod
     found_module_types = tuple(found_module_types)
     assert any(isinstance(module, found_module_types) for module in model.modules())
     return found_module_types
+
+
+def create_dequantized_gptq_model(
+    model: transformers.PreTrainedModel, *,
+    reuse_non_quantized: bool,
+    dequantized_dtype: torch.dtype
+):
+    memo = dict()  # for deepcopy with replacement
+    master_parameters = dict()
+    all_quantized_weight_parameters = set()
+
+    for name, module in model.named_modules():
+        if 'qlinear' in module.__module__:
+            assert module not in master_parameters and id(module) not in memo, f"{name} is converted more than once"
+            quantized_weight = GPTQQuantizedWeight(module)
+            quantized_weight.wrap_params_for_fsdp_()
+
+            dequantized_module = nn.Linear(
+                module.infeatures, module.outfeatures, bias=module.bias is not None,
+                dtype=dequantized_dtype,
+                device=next(quantized_weight.parameters()).device
+            )
+            with torch.no_grad():
+                dequantized_module.weight[...] = quantized_weight()
+                dequantized_module.weight.requires_grad = any(p.requires_grad for p in quantized_weight.parameters())
+
+                if module.bias is not None and not reuse_non_quantized:
+                    dequantized_module.bias[...] = module.bias
+                    dequantized_module.bias.requires_grad = dequantized_module.bias.requires_grad
+                elif module.bias is not None and reuse_non_quantized:
+                    dequantized_module.bias = module.bias
+
+            memo[id(module)] = dequantized_module
+            master_parameters[f"{name}.weight"] = quantized_weight
+            if dequantized_module.bias is not module.bias:
+                master_parameters[f"{name}.bias"] = module.bias
+            all_quantized_weight_parameters |= set(quantized_weight.parameters())
+            assert all(param in {dequantized_module.weight, dequantized_module.bias}
+                       for param in dequantized_module.parameters())
+
+    for name, param_or_buffer in chain(model.named_parameters(), model.named_buffers()):
+        if name in master_parameters or param_or_buffer in all_quantized_weight_parameters:
+            continue  # parameter already accounted for in the previous loop
+        assert name not in master_parameters, name
+        assert id(param_or_buffer) not in memo, name
+        if reuse_non_quantized:
+            new_param_or_buffer = param_or_buffer
+        elif isinstance(param_or_buffer, nn.Parameter):
+            new_param_or_buffer = nn.Parameter(param_or_buffer.data.clone(), param_or_buffer.requires_grad)
+        else:
+            new_param_or_buffer = param_or_buffer.detach().clone().requires_grad_(param_or_buffer.requires_grad)
+        if new_param_or_buffer is not param_or_buffer:
+            master_parameters[name] = new_param_or_buffer
+        memo[id(param_or_buffer)] = new_param_or_buffer
+
+    dequantized_model = deepcopy(model, memo=memo)
+
+    for name, module in dequantized_model.named_modules():
+        assert not isinstance(module, GPTQQuantizedWeight), (f"Dequantized model should not have quantized weights, "
+                                                         f"but found {name} that is {module}")
+    if reuse_non_quantized:
+        assert all(isinstance(master, GPTQQuantizedWeight) for master in master_parameters.values())
+    verify_dequantized_model(dequantized_model, master_parameters)
+    return dequantized_model, master_parameters
+
 
 
 def create_dequantized_model(
@@ -68,7 +135,7 @@ def create_dequantized_model(
             memo[id(module)] = dequantized_module
             master_parameters[f"{name}.weight"] = quantized_weight
             if dequantized_module.bias is not module.bias:
-                master_parameters[f"{name}.weight"] = module.bias
+                master_parameters[f"{name}.bias"] = module.bias
             all_quantized_weight_parameters |= set(quantized_weight.parameters())
             assert all(param in {dequantized_module.weight, dequantized_module.bias}
                        for param in dequantized_module.parameters())
@@ -149,12 +216,12 @@ def split_quantized_weights_between_ranks(quantized_weights: Dict[str, Quantized
     assert torch.distributed.is_initialized()
     own_rank = torch.distributed.get_rank()
     world_size = torch.distributed.get_world_size()
-    all_quantized_weights: Dict[QuantizedWeight, List[str]] = defaultdict(list)
+    all_quantized_weights: Dict[GPTQQuantizedWeight, List[str]] = defaultdict(list)
     for name, quantized_weight in quantized_weights.items():
         all_quantized_weights[quantized_weight].append(name)
 
     # order quantized weights in a rank-agnostic way: order by (param size desc, linked param name asc)
-    def _compute_size(qw: QuantizedWeight) -> float:
+    def _compute_size(qw: GPTQQuantizedWeight) -> float:
         return qw.out_features * qw.in_features * qw.estimate_nbits_per_parameter()
     ordered_quantized_weights = sorted(
         all_quantized_weights, key=lambda qw: (-_compute_size(qw), min(all_quantized_weights[qw]))

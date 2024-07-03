@@ -6,9 +6,9 @@ from typing import Optional, Dict, Tuple, List, Any, Sequence, Iterator, Union
 import torch
 import torch.nn as nn
 import torch.distributed
-from torch.optim.optimizer import StateDict
+# from torch.optim.optimizer import StateDict
 
-from src.aq import QuantizedWeight
+from src.gptq import GPTQQuantizedWeight as QuantizedWeight
 from src.configurable_adam import ConfigurableAdamW
 from src.pv_utils import print_runtime_stats, YourQuantizedWeightIsInAnotherRank
 
@@ -62,6 +62,9 @@ class StraightThroughAdamW(ConfigurableAdamW):
         Used only if delta_decay != 1.
 
     """
+
+    # codes -> qweight and qzeros
+    # codebooks & scales -> scales
 
     def __init__(self,
                  named_dequantized_params: Dict[str, nn.Parameter],
@@ -376,7 +379,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
             if isinstance(quantized_weight, QuantizedWeight):  # skip YourQuantizedWeightIsInAnotherRank if sharded
                 yield name, quantized_weight
 
-    def state_dict(self) -> StateDict:
+    def state_dict(self):
         state_dict = super().state_dict()
         assert "quantized_weight_state_dicts" not in state_dict
         state_dict["quantized_weight_state_dicts"] = {
@@ -386,8 +389,8 @@ class StraightThroughAdamW(ConfigurableAdamW):
         # note: the de-quantized params are not saved here; instead, they are saved with model.state_dict
         return state_dict
 
-    def load_state_dict(self, state_dict: StateDict) -> None:
-        quantized_weight_state_dicts: Dict[str, StateDict] = dict(state_dict.pop("quantized_weight_state_dicts"))
+    def load_state_dict(self, state_dict) -> None:
+        quantized_weight_state_dicts = dict(state_dict.pop("quantized_weight_state_dicts"))
         for name, quantized_weight in self.iterate_local_quantized_weights():
             quantized_weight.load_state_dict(quantized_weight_state_dicts.pop(name))
         assert len(quantized_weight_state_dicts) == 0, f"unused keys: {quantized_weight_state_dicts.keys()}"

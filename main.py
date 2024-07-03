@@ -8,7 +8,8 @@ import torch
 import torch.nn as nn
 from tqdm import trange
 from tqdm.auto import trange
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, AutoModelForCausalLM, AutoTokenizer, GPTQConfig
+from datasets import load_dataset
 
 from aq_engine import AQEngine
 from src.aq import QuantizedLinear
@@ -32,6 +33,25 @@ try:
     has_wandb = True
 except ModuleNotFoundError:
     has_wandb = False
+
+
+@torch.no_grad()
+def quantize_model_gptq(model: PreTrainedModel, args: Namespace):
+    print('Start GPTQ Quantization ...')
+    tick = time.time()
+    token = os.getenv("HUGGINGFACE_TOKEN")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, token=token)
+    quantization_config = GPTQConfig(bits=4, group_size=128, dataset=args.dataset, tokenizer=tokenizer)
+    quantized_model = AutoModelForCausalLM.from_pretrained(args.model_path, device_map='auto',  quantization_config=quantization_config, low_cpu_mem_usage=True)
+    print("=====================\nFinal stats:")
+    model.save_pretrained(args.save)
+    quantized_model.save_pretrained(args.save)
+
+    if args.wandb:
+        wandb.log({"max_cuda_mem_quantize": round(torch.cuda.max_memory_allocated() / 1e9, 2)})
+    print(f"quantize: {torch.cuda.max_memory_allocated()=:,}")
+    print(f"quantization time: {time.time() - tick:.1f}")
+    return quantized_model
 
 
 def quantize_model(model: PreTrainedModel, args: Namespace):
@@ -580,6 +600,31 @@ def update_outs_parallel(
     return list(chain(*out_losses_by_device))
 
 
+def calculate_perplexity(model, tokenizer, dataset, max_length=512, stride=256):
+    model.eval()
+    total_log_likelihood = 0
+    total_tokens = 0
+    
+    with torch.no_grad():
+        for example in dataset:
+            inputs = tokenizer(example["text"], return_tensors="pt", max_length=max_length, truncation=True)
+            input_ids = inputs.input_ids.to(model.device)
+            n_tokens = input_ids.size(1)
+            
+            if n_tokens < 2:
+                continue
+            
+            outputs = model(input_ids, labels=input_ids)
+            log_likelihood = outputs.loss.item() * n_tokens
+            total_log_likelihood += log_likelihood
+            total_tokens += n_tokens
+            
+    ppl = torch.exp(torch.tensor(total_log_likelihood / total_tokens)).item()
+    if args.wandb:
+        wandb.log({args.dataset: ppl})
+    return ppl
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -889,7 +934,23 @@ if __name__ == "__main__":
 
     if not args.load and not args.no_quant:
         print("\n============ Quantizing model... ============")
-        quantize_model(model, args)
+        # quantize_model(model, args)
+        quantized_model = quantize_model_gptq(model, args)
+    
+    print("\n============ Evaluating perplexity... ============")
+    wikitext2_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+
+    # Calculate perplexity for the original model
+    # original_perplexity = calculate_perplexity(model, tokenizer, wikitext2_dataset)
+    # print(f"Original Model Perplexity: {original_perplexity}")
+
+    # Calculate perplexity for the quantized model
+    quantized_perplexity = calculate_perplexity(quantized_model, tokenizer, wikitext2_dataset)
+    print(f"Quantized Model Perplexity: {quantized_perplexity}")
+
+    print('Bye')
+    exit()
 
     print("\n============ Evaluating perplexity... ============")
     torch.cuda.reset_peak_memory_stats()
