@@ -390,7 +390,7 @@ def add_data_args(parser: argparse.ArgumentParser):
     )
 
 
-def prepare_training_dataset(args: argparse.Namespace, tokenizer: transformers.PreTrainedTokenizer) -> datasets.Dataset:
+def prepare_training_dataset(args: argparse.Namespace, tokenizer: transformers.PreTrainedTokenizer, is_fsdp: bool = True) -> datasets.Dataset:
     if os.path.exists(args.dataset_name):
         dataset = datasets.load_from_disk(args.dataset_name)
     else:
@@ -407,7 +407,7 @@ def prepare_training_dataset(args: argparse.Namespace, tokenizer: transformers.P
     def is_tokenized(dataset):
         return 'input_ids' in dataset.column_names
     if is_tokenized(dataset):
-        if torch.distributed.get_rank() == 0:
+        if (is_fsdp and torch.distributed.get_rank() == 0) or not is_fsdp:
             print("Dataset already tokenized")
             assert len(dataset[0]['input_ids']) == args.model_seqlen
         return dataset
@@ -446,7 +446,7 @@ def prepare_training_dataset(args: argparse.Namespace, tokenizer: transformers.P
     return lm_dataset
 
 
-def load_base_model(args: argparse.Namespace, device: torch.device) -> FullyShardedDataParallel:
+def load_base_model(args: argparse.Namespace, device: torch.device, is_fsdp: bool = True) -> FullyShardedDataParallel:
     # base_model = get_model(
     #     args.base_model, load_quantized=None, dtype=args.load_dtype, trust_remote_code=args.trust_remote_code,
     #     attn_implementation=args.attn_implementation,
@@ -467,7 +467,9 @@ def load_base_model(args: argparse.Namespace, device: torch.device) -> FullyShar
     
     # print(f'Before FSDP base wrapping - device {device}:,  rank: {torch.distributed.get_rank()}')
 
-    base_model = base_model.to(device)
+    if not is_fsdp:
+        return base_model.to(device)
+
     return FullyShardedDataParallel(
         base_model,
         auto_wrap_policy=lambda module, recurse, **_: recurse or isinstance(module, transformer_block_types),
@@ -475,7 +477,7 @@ def load_base_model(args: argparse.Namespace, device: torch.device) -> FullyShar
     )
 
 
-def load_dequantized_model(args: argparse.Namespace, device: torch.device) -> Tuple[FullyShardedDataParallel, dict]:
+def load_dequantized_model(args: argparse.Namespace, device: torch.device, is_fsdp: bool = True) -> Tuple[FullyShardedDataParallel, dict]:
     # if not args.monkeypatch_old_pickle:
     #     quantized_model = get_model(
     #         args.base_model, args.quantized_model, dtype=args.load_dtype, trust_remote_code=args.trust_remote_code,
@@ -487,8 +489,7 @@ def load_dequantized_model(args: argparse.Namespace, device: torch.device) -> Tu
     #         attn_implementation=args.attn_implementation
     #     ).to(args.master_dtype)
 
-    quantized_model = AutoGPTQForCausalLM.from_quantized(args.quantized_model)
-
+    quantized_model = AutoGPTQForCausalLM.from_quantized(args.quantized_model, device=device)
 
     quantized_model.config.use_cache = False
     quantized_model.train(True)  # note: HF gradient checkpoints do not work for some models without train(True); see
@@ -511,6 +512,9 @@ def load_dequantized_model(args: argparse.Namespace, device: torch.device) -> Tu
     dequantized_model, named_quantized_params = create_dequantized_gptq_model(
         quantized_model, dequantized_dtype=args.amp_dtype, reuse_non_quantized=True)
     del quantized_model
+
+    if not is_fsdp:
+        return dequantized_model, named_quantized_params
 
     transformer_block_types = list(infer_module_classes(dequantized_model, args.block_type))
     layernorm_types = list(transformers.pytorch_utils.ALL_LAYERNORM_LAYERS)
@@ -536,9 +540,6 @@ def load_dequantized_model(args: argparse.Namespace, device: torch.device) -> Tu
         if torch.distributed.get_rank() == 0:
             print(f"Not using FSDP native MixedPrecision; Local amp_dtype={args.amp_dtype}.")
 
-    # print(f'Before FSDP deq wrapping - device {device}:,  rank: {torch.distributed.get_rank()}')
-
-    dequantized_model = dequantized_model.to(device)
     fsdp_model = FullyShardedDataParallel(
         dequantized_model,
         auto_wrap_policy=lambda module, recurse, **_: recurse or isinstance(module, block_types_to_wrap),
@@ -679,6 +680,11 @@ def main():
     world_size = torch.distributed.get_world_size()
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(rank)
+    # torch.distributed.init_process_group()
+    # world_size = torch.distributed.get_world_size()
+    # rank = torch.distributed.get_rank() % torch.cuda.device_count()
+    # torch.cuda.set_device(rank)
+    # device = torch.device(f"cuda:{rank}")
 
     assert args.batch_size is not None, "please specify batch size"
     assert args.batch_size % world_size == 0
@@ -782,6 +788,7 @@ def main():
         beam_size=args.beam_size,
         straight_through_buffer_dtype=args.straight_through_buffer_dtype,
         verbose=args.verbose_optimizer,
+        device=device
     )
     del named_quantized_params
 
@@ -814,10 +821,10 @@ def main():
             metadata['microbatches_since_epoch_start'] += 1
             metadata['total_microbatches'] += 1
 
-            print('base model device: ', next(base_model.parameters()).device)
-            print('dequantized model device: ', next(dequantized_model.parameters()).device)
             batch = {k: v.to(device) for k, v in batch.items()}
             loss = compute_loss_on_batch(batch, base_model, dequantized_model, amp_dtype=args.amp_dtype)
+
+            print(loss.item())
 
             metadata['loss_numerator'] += loss.item()
             metadata['loss_denominator'] += 1

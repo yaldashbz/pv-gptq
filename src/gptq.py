@@ -3,7 +3,8 @@ import torch.nn as nn
 
 from typing import List, Optional, Union, Tuple
 from src.kmeans import find_nearest_cluster, fit_faiss_kmeans, fit_kmeans, fit_kmeans_1d
-
+from src.beam_search_xtx import beam_search_optimal_codes as beam_search_minimize_activation_mse
+from src.beam_search_l2 import beam_search_optimal_codes as beam_search_minimize_weight_mse
 from src.aq_ops import IntCodes
 
 # Copied from https://github.com/IST-DASLab/marlin/pull/1
@@ -68,8 +69,7 @@ class GPTQQuantizedWeight(nn.Module):
             self,
             refrence_layer, # quantized refrence layer (int32)
             scale_nbits: int = 0,
-            straight_through_gradient: Optional[bool] = None,
-            scales_are_lossless: Optional[bool] = True
+            straight_through_gradient: Optional[bool] = None
 ) -> None:
         super().__init__()
         self.scales = nn.Parameter(refrence_layer.scales, requires_grad=True)
@@ -78,22 +78,29 @@ class GPTQQuantizedWeight(nn.Module):
         self.qweight_storage: Optional[IntCodes] = None  # storage for FSDP compatibility
         self.qzeros_storage: Optional[IntCodes] = None  # storage for FSDP compatibility
 
-        self.dequantized_weight, _ = dequantize_weight(refrence_layer)
-        self.out_features, self.in_features = self.dequantized_weight.shape
+        dequantized_weight, _ = dequantize_weight(refrence_layer)
+        self.out_features, self.in_features = dequantized_weight.shape
         self.scale_nbits = scale_nbits
         self.straight_through_gradient = straight_through_gradient
-        self.scales_are_lossless = scales_are_lossless
-
+        self.scales_are_lossless = scale_nbits == 0
     
     @property
     def shape(self):
         return self.out_features, self.in_features
     
-    
     def forward(self):
-        return self.dequantized_weight
+        dequantized_weight = self.dequantize_weight(self.qweight, self.qzeros, self.scales)
+        dequantized_weight.requires_grad_(True)
+        return dequantized_weight
     
-    
+    def dequantize_weight(self, qweight, qzeros, scales):
+        unpacked_qweight, unpacked_qzeros = unpack_4bit_to_32bit_signed(qweight, qzeros)
+        group_size = unpacked_qweight.shape[0] // scales.shape[0]
+        scales = scales.repeat_interleave(group_size, dim=0)
+        unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
+        unpacked_qweight = (unpacked_qweight - unpacked_qzeros) * scales
+        return unpacked_qweight.T
+
     def estimate_nbits_per_parameter(self) -> float:
         """Calculate the effective number of bits per original matrix parameters"""
         return 4
@@ -107,7 +114,7 @@ class GPTQQuantizedWeight(nn.Module):
         self.qzeros_storage, self.qzeros = IntCodes(self.qzeros, **kwargs), None
     
     def unwrap_params_(self):
-        """Undo the effect of wrap_codes_for_fsdp_; modifies state dict in-place"""
+        """Undo the effect of wrap_params_for_fsdp_; modifies state dict in-place"""
         assert self.qweight is None and self.qweight_storage is not None
         self.qweight, self.qweight_storage = nn.Parameter(self.qweight_storage(), requires_grad=False), None
 
@@ -124,7 +131,7 @@ class GPTQQuantizedWeight(nn.Module):
     
     def get_qzeros(self) -> torch.IntTensor:
         """Get a non view to qzeros, regardless of how codes are stored"""
-        assert (self.qzeros is None) != (self.qzeros is None), "must have either .codes or storage, but not both"
+        assert (self.qzeros is None) != (self.qzeros_storage is None), "must have either .codes or storage, but not both"
         qzeros = self.qzeros if self.qzeros is not None else self.qzeros_storage()
         if torch.iinfo(qzeros.dtype).bits < 32:
             qzeros = qzeros.to(torch.int32)  # cast to int32 to allow indexing if codes are int16 or uint8
@@ -145,3 +152,12 @@ class GPTQQuantizedWeight(nn.Module):
             return dequantized_scales
         else:  # train scale codebook only
             return self.scales_clusters.gather(1, self.scales_indices)[:, :, None, None]
+
+    def get_discretes(self) -> torch.Tensor:
+        qweight, qzeros = self.get_qweight(), self.get_qzeros()
+        discretes = torch.cat((qweight.flatten(), qzeros.flatten()))
+        return discretes
+
+    def get_codes(self):
+        # TODO move to wrapper
+        return self.get_discretes()

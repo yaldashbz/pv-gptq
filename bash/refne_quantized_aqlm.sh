@@ -22,6 +22,6 @@ torchrun --nproc-per-node=$NUM_GPUS finetune_fsdp.py \
     --lamb --debias --lr 3e-4 --adam_beta1 0.9 --adam_beta2 0.95 \
     --code_lr 3e-3 --code_beta1 0.0 --code_beta2 0.95 --beam_size 1 --delta_decay 0 \
     --max_code_change_per_step 1e-2 --code_trust_ratio 1e-2 --code_selection_temperature 0 \
-    --batch_size=256 --microbatch_size=8 --max_epochs 10 --gradient_checkpointing \
+    --batch_size=256 --microbatch_size=4 --max_epochs 10 --gradient_checkpointing \
     --print_every_steps=1 --verbose_optimizer  --eval_every_steps=10 --keep_best_model \
     --save $SNAPSHOT_PATH --save_every_steps 100

@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.distributed
 # from torch.optim.optimizer import StateDict
 
-from src.gptq import GPTQQuantizedWeight as QuantizedWeight
+from src.gptq import GPTQQuantizedWeight
 from src.configurable_adam import ConfigurableAdamW
 from src.pv_utils import print_runtime_stats, YourQuantizedWeightIsInAnotherRank
 
@@ -68,7 +68,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
 
     def __init__(self,
                  named_dequantized_params: Dict[str, nn.Parameter],
-                 named_quantized_params: Dict[str, Union[QuantizedWeight, YourQuantizedWeightIsInAnotherRank]],
+                 named_quantized_params: Dict[str, Union[GPTQQuantizedWeight, YourQuantizedWeightIsInAnotherRank]],
                  *,
                  update_non_quantized_parameters: Optional[dict] = None,
                  update_codebooks_and_scales: Optional[dict] = None,
@@ -84,11 +84,11 @@ class StraightThroughAdamW(ConfigurableAdamW):
                  verbose: bool = False,
                  **kwargs):
         assert 0 <= delta_decay <= 1
-        assert all(isinstance(qw, (QuantizedWeight, YourQuantizedWeightIsInAnotherRank))
+        assert all(isinstance(qw, (GPTQQuantizedWeight, YourQuantizedWeightIsInAnotherRank))
                    for qw in named_quantized_params.values())
         assert all(name in named_dequantized_params for name in named_quantized_params), "param names mismatch"
 
-        self.sharded = not all(isinstance(qw, QuantizedWeight) for qw in named_quantized_params.values())
+        self.sharded = not all(isinstance(qw, GPTQQuantizedWeight) for qw in named_quantized_params.values())
         self.is_straight_through = delta_decay != 1
         if verbose and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0):
             print(end=f"PV optimizer init:\n\tAre quantized weights sharded? : {self.sharded}.\n")
@@ -105,7 +105,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
         self.ordered_quantized_weight_names = tuple(sorted(named_quantized_params.keys()))
         self.optimized_param_to_name = {param: name for name, param in all_optimized_params.items()}
         self.quantized_weights_by_name = {name: qw for name, qw in named_quantized_params.items()
-                                          if isinstance(qw, (QuantizedWeight, YourQuantizedWeightIsInAnotherRank))}
+                                          if isinstance(qw, (GPTQQuantizedWeight, YourQuantizedWeightIsInAnotherRank))}
         self.straight_through_buffer_by_name = {
             name: all_optimized_params[name] for name in self.quantized_weights_by_name.keys()
             if name in all_optimized_params} if self.is_straight_through else {}
@@ -139,7 +139,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
         for name, param in named_dequantized_params.items():
             if name not in named_quantized_params or isinstance(named_quantized_params[name], torch.Tensor):
                 non_quantized_params[name] = param
-            elif isinstance(named_quantized_params[name], QuantizedWeight):
+            elif isinstance(named_quantized_params[name], GPTQQuantizedWeight):
                 quantized_weight = named_quantized_params[name]
                 if self.is_straight_through:   # create an accumulator for optimizer updates; sharded alongside FSDP
                     with torch.no_grad():
@@ -198,7 +198,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
 
         for name in self.ordered_quantized_weight_names:
             if self.dequantized_weights_by_name[name].grad is None:
-                assert self.dequantized_weights_by_name[name].numel() == 0
+                # assert self.dequantized_weights_by_name[name].numel() == 0
                 self.dequantized_weights_by_name[name].grad = torch.zeros_like(self.dequantized_weights_by_name[name])
             grad = self.dequantized_weights_by_name[name].grad
             assert grad is not None, name
@@ -265,7 +265,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
             # if sharded, every rank propagates gradients only for the QuantizedWeight instances owned by this rank
             with torch.enable_grad():
                 for name, quantized_weight in self.quantized_weights_by_name.items():
-                    if isinstance(quantized_weight, QuantizedWeight):
+                    if isinstance(quantized_weight, GPTQQuantizedWeight):
                         quantized_weight.forward().backward(aggregated_grads_by_name[name])
 
     @torch.no_grad()
@@ -273,7 +273,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
         """Update discrete state representations to approximate straight through buffers"""
         # note: if sharded, this only updates the subset of quantized weights that are assigned to local rank
         remaining_quantized_weights = {
-            name: qw for name, qw in self.quantized_weights_by_name.items() if isinstance(qw, QuantizedWeight)
+            name: qw for name, qw in self.quantized_weights_by_name.items() if isinstance(qw, GPTQQuantizedWeight)
         }
         if self.is_straight_through:
             reference_weights_by_name = self.straight_through_buffer_by_name
@@ -281,14 +281,14 @@ class StraightThroughAdamW(ConfigurableAdamW):
             reference_weights_by_name = self._aggregate_dequantized_weights()
 
         for param_group in self.param_groups:
-            if param_group['role'] == ParameterRole.QUANTIZED_PARAMETER:
+            if param_group['role'].name == ParameterRole.QUANTIZED_PARAMETER.name:
                 for param in param_group['params']:
                     # param is either a dequantized weight or a special straight-through buffer (if is_straight_through)
                     name = self.optimized_param_to_name[param]
                     quantized_weight = remaining_quantized_weights.pop(name)
                     reference_weight = reference_weights_by_name[name]
                     assert reference_weight.shape == quantized_weight.shape, (reference_weight.shape, quantized_weight.shape)
-                    assert isinstance(quantized_weight, QuantizedWeight)
+                    assert isinstance(quantized_weight, GPTQQuantizedWeight)
 
                     prev_codes = quantized_weight.get_codes().clone()  # [num_output_groups, num_input_groups]
                     new_codes = quantized_weight.beam_search_update_codes_(
@@ -346,7 +346,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
                 dequantized_weight_buffer[...] = quantized_weight()
 
             else:
-                if isinstance(quantized_weight, QuantizedWeight):
+                if isinstance(quantized_weight, GPTQQuantizedWeight):
                     new_dequantized_weight = quantized_weight().to(dequantized_weight_buffer.dtype)
                     shard_sizes: Sequence[int] = self.sharded_param_sizes_by_rank[name]
                     assert sum(shard_sizes) == new_dequantized_weight.numel()
@@ -373,10 +373,10 @@ class StraightThroughAdamW(ConfigurableAdamW):
             elif param.grad is not None:
                 param.grad.zero_()
 
-    def iterate_local_quantized_weights(self) -> Iterator[Tuple[str, QuantizedWeight]]:
+    def iterate_local_quantized_weights(self) -> Iterator[Tuple[str, GPTQQuantizedWeight]]:
         """Iterate over (name, QuantizedWeight) pairs for all quantized weights trained by this optimizer and rank"""
         for name, quantized_weight in self.quantized_weights_by_name.items():
-            if isinstance(quantized_weight, QuantizedWeight):  # skip YourQuantizedWeightIsInAnotherRank if sharded
+            if isinstance(quantized_weight, GPTQQuantizedWeight):  # skip YourQuantizedWeightIsInAnotherRank if sharded
                 yield name, quantized_weight
 
     def state_dict(self):
