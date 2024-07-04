@@ -44,7 +44,7 @@ def create_dequantized_gptq_model(
         if 'qlinear' in module.__module__:
             assert module not in master_parameters and id(module) not in memo, f"{name} is converted more than once"
             quantized_weight = GPTQQuantizedWeight(module)
-            # quantized_weight.wrap_params_for_fsdp_()
+            quantized_weight.wrap_params_for_fsdp_()
 
             dequantized_module = nn.Linear(
                 module.infeatures, module.outfeatures, bias=module.bias is not None,

@@ -127,7 +127,7 @@ class IntCodes(nn.Module):
         self.dtype, self.shape, self.numel = codes.dtype, codes.shape, codes.numel()
         size_ratio = torch.finfo(storage_dtype).bits // torch.iinfo(codes.dtype).bits
         codes = F.pad(codes.flatten().clone(), pad=[0, -codes.numel() % size_ratio])
-        # assert len(codes.untyped_storage()) == codes.nbytes  # no offset / stride / tail
+        assert len(codes.untyped_storage()) == codes.nbytes  # no offset / stride / tail
         self.storage_dtype = storage_dtype
         self.data = nn.Parameter(
             torch.as_tensor(codes.untyped_storage(), device=codes.device, dtype=storage_dtype),

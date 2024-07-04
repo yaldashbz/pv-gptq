@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from typing import List, Optional, Union, Tuple
 from src.kmeans import find_nearest_cluster, fit_faiss_kmeans, fit_kmeans, fit_kmeans_1d
@@ -89,7 +90,7 @@ class GPTQQuantizedWeight(nn.Module):
         return self.out_features, self.in_features
     
     def forward(self):
-        dequantized_weight = self.dequantize_weight(self.qweight, self.qzeros, self.scales)
+        dequantized_weight = self.dequantize_weight(self.get_qweight(), self.get_qzeros(), self.get_scales())
         dequantized_weight.requires_grad_(True)
         return dequantized_weight
     

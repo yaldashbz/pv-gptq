@@ -787,8 +787,7 @@ def main():
         code_trust_ratio=args.code_trust_ratio,
         beam_size=args.beam_size,
         straight_through_buffer_dtype=args.straight_through_buffer_dtype,
-        verbose=args.verbose_optimizer,
-        device=device
+        verbose=args.verbose_optimizer
     )
     del named_quantized_params
 
