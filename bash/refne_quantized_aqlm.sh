@@ -6,13 +6,13 @@ export SNAPSHOT_PATH=../PV-GPTQ/pv_model
 export SEQLEN=4096
 export NUM_GPUS=4
 
-export WANDB_PROJECT=pv-tuning
-export WANDB_NAME=pv-tuning_gptq_tinyllama_pajama
+export WANDB_PROJECT=pv-gptq
+export WANDB_NAME=pv-gptq_tinyllama_pajama_calib-pajama
 export HUGGINGFACE_TOKEN='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'
 
 
 torchrun --nproc-per-node=$NUM_GPUS finetune_fsdp.py \
-    --base_model $MODEL_PATH --quantized_model $QUANTIZED_MODEL_PATH  --monkeypatch_old_pickle \
+    --base_model $MODEL_PATH --quantized_model $QUANTIZED_MODEL_PATH \
     --model_seqlen=$SEQLEN --block_type LlamaDecoderLayer --limit_parallel_inits 4 \
     --load_dtype bfloat16 --amp_dtype bfloat16 --code_dtype int16 \
     --straight_through_buffer_dtype float32 \
@@ -23,5 +23,5 @@ torchrun --nproc-per-node=$NUM_GPUS finetune_fsdp.py \
     --code_lr 3e-3 --code_beta1 0.0 --code_beta2 0.95 --beam_size 1 --delta_decay 0 \
     --max_code_change_per_step 1e-2 --code_trust_ratio 1e-2 --code_selection_temperature 0 \
     --batch_size=256 --microbatch_size=4 --max_epochs 10 --gradient_checkpointing \
-    --print_every_steps=1 --verbose_optimizer  --eval_every_steps=10 --keep_best_model \
+    --print_every_steps=1 --verbose_optimizer  --eval_every_steps=10 --keep_best_model --wandb \
     --save $SNAPSHOT_PATH --save_every_steps 100

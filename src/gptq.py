@@ -103,6 +103,7 @@ class GPTQQuantizedWeight(nn.Module):
         return unpacked_qweight.T
 
     def estimate_nbits_per_parameter(self) -> float:
+        # TODO
         """Calculate the effective number of bits per original matrix parameters"""
         return 4
     
@@ -154,11 +155,3 @@ class GPTQQuantizedWeight(nn.Module):
         else:  # train scale codebook only
             return self.scales_clusters.gather(1, self.scales_indices)[:, :, None, None]
 
-    def get_discretes(self) -> torch.Tensor:
-        qweight, qzeros = self.get_qweight(), self.get_qzeros()
-        discretes = torch.cat((qweight.flatten(), qzeros.flatten()))
-        return discretes
-
-    def get_codes(self):
-        # TODO move to wrapper
-        return self.get_discretes()

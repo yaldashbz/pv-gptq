@@ -513,6 +513,12 @@ def load_dequantized_model(args: argparse.Namespace, device: torch.device, is_fs
         quantized_model, dequantized_dtype=args.amp_dtype, reuse_non_quantized=True)
     del quantized_model
 
+    # assert all params are in the right device and same dtype
+    # dequantized_model = dequantized_model.to(device)
+    # dequantized_model.to(args.amp_dtype)
+    # assert len(set(param.device for param in dequantized_model.parameters())) == 1
+    # assert len(set(param.dtype for param in dequantized_model.parameters())) == 1
+
     if not is_fsdp:
         return dequantized_model, named_quantized_params
 
@@ -733,10 +739,10 @@ def main():
         dataset, batch_size=args.microbatch_size, num_workers=args.num_workers, sampler=sampler,
         collate_fn=transformers.default_data_collator
     )
-    # eval_datasets = {dataset_name: get_loaders(
-    #     dataset_name, seed=args.seed, model_path=args.base_model, seqlen=args.model_seqlen, eval_mode=True,
-    #     ) for dataset_name in args.eval_datasets
-    # }
+    eval_datasets = {dataset_name: get_loaders(
+        dataset_name, seed=args.seed, model_path=args.base_model, seqlen=args.model_seqlen, eval_mode=True,
+        ) for dataset_name in args.eval_datasets
+    }
 
     with one_rank_at_a_time(local=True, group_size=args.limit_parallel_inits):
         base_model = load_base_model(args, device)

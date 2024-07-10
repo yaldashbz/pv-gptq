@@ -148,8 +148,10 @@ class StraightThroughAdamW(ConfigurableAdamW):
                                                       requires_grad=dequantized_weight.requires_grad)
                 else:
                     dequantized_weight = param
+                # quantized weights (model.model.layers.0.self_attn.q_proj.weight)
                 quantized_params[name] = dequantized_weight
                 for subparam_name, subparam in quantized_weight.named_parameters():
+                    # qweight_storage, qzeros_storage, scales are here (model.model.layers.0.self_attn.q_proj.weight.scales | .qweight_storage.data | .qzeros_storage.data
                     full_name = f'{name}.{subparam_name}'
                     assert full_name not in quantized_representation_params, full_name
                     quantized_representation_params[full_name] = subparam
@@ -198,7 +200,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
 
         for name in self.ordered_quantized_weight_names:
             if self.dequantized_weights_by_name[name].grad is None:
-                # assert self.dequantized_weights_by_name[name].numel() == 0
+                assert self.dequantized_weights_by_name[name].numel() == 0
                 self.dequantized_weights_by_name[name].grad = torch.zeros_like(self.dequantized_weights_by_name[name])
             grad = self.dequantized_weights_by_name[name].grad
             assert grad is not None, name
@@ -281,7 +283,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
             reference_weights_by_name = self._aggregate_dequantized_weights()
 
         for param_group in self.param_groups:
-            if param_group['role'].name == ParameterRole.QUANTIZED_PARAMETER.name:
+            if param_group['role'] == ParameterRole.QUANTIZED_PARAMETER:
                 for param in param_group['params']:
                     # param is either a dequantized weight or a special straight-through buffer (if is_straight_through)
                     name = self.optimized_param_to_name[param]
@@ -290,25 +292,25 @@ class StraightThroughAdamW(ConfigurableAdamW):
                     assert reference_weight.shape == quantized_weight.shape, (reference_weight.shape, quantized_weight.shape)
                     assert isinstance(quantized_weight, GPTQQuantizedWeight)
 
-                    prev_codes = quantized_weight.get_codes().clone()  # [num_output_groups, num_input_groups]
-                    new_codes = quantized_weight.beam_search_update_codes_(
-                        reference_weight=reference_weight,
-                        beam_size=self.beam_size,
-                        stochastic_rounding_tau=self.stochastic_rounding_tau,
-                        max_update_fraction=self.max_code_change_per_step,
-                        force_update=self.force_code_update,
-                        code_selection_temperature=self.code_selection_temperature,
-                        trust_ratio=self.code_trust_ratio,
-                        dim_rng=random.Random(None),
-                    )  # note: this updates quantized_weight codes in-place
-                    if self.delta_decay != 0 and self.is_straight_through:
-                        self.straight_through_buffer_by_name[name][...] = (
-                                self.delta_decay * quantized_weight() + (1 - self.delta_decay) * reference_weight
-                        )
-                        # if not is_straight_throuh, param will be properly updated in _update_dequantized_weights
+                    # prev_codes = quantized_weight.get_codes().clone()  # [num_output_groups, num_input_groups]
+                    # new_codes = quantized_weight.beam_search_update_codes_(
+                    #     reference_weight=reference_weight,
+                    #     beam_size=self.beam_size,
+                    #     stochastic_rounding_tau=self.stochastic_rounding_tau,
+                    #     max_update_fraction=self.max_code_change_per_step,
+                    #     force_update=self.force_code_update,
+                    #     code_selection_temperature=self.code_selection_temperature,
+                    #     trust_ratio=self.code_trust_ratio,
+                    #     dim_rng=random.Random(None),
+                    # )  # note: this updates quantized_weight codes in-place
+                    # if self.delta_decay != 0 and self.is_straight_through:
+                    #     self.straight_through_buffer_by_name[name][...] = (
+                    #             self.delta_decay * quantized_weight() + (1 - self.delta_decay) * reference_weight
+                    #     )
+                    #     # if not is_straight_throuh, param will be properly updated in _update_dequantized_weights
 
                     if self.verbose:
-                        code_change_rate = torch.not_equal(prev_codes, new_codes).any(-1).float().mean().item()
+                        # code_change_rate = torch.not_equal(prev_codes, new_codes).any(-1).float().mean().item()
                         maybe_distributed_msg = ""
                         if torch.distributed.is_initialized():
                             maybe_distributed_msg = f" (rank {torch.distributed.get_rank()})"
@@ -316,9 +318,9 @@ class StraightThroughAdamW(ConfigurableAdamW):
                         if self.max_code_change_per_step is not None:
                             maybe_limit_msg = f"(limit {self.max_code_change_per_step})"
                         maybe_individual_msg = ""
-                        if quantized_weight.num_codebooks > 1:
-                            subcode_change = torch.not_equal(prev_codes, new_codes).float().mean().item()
-                            maybe_individual_msg = f" | overall change {subcode_change:.8f}"
+                        # if quantized_weight.num_codebooks > 1:
+                        #     subcode_change = torch.not_equal(prev_codes, new_codes).float().mean().item()
+                        #     maybe_individual_msg = f" | overall change {subcode_change:.8f}"
                         maybe_delta_msg = ""
                         if self.delta_decay != 1:
                             _dequantized_weight = quantized_weight()
@@ -327,7 +329,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
                             maybe_delta_msg = (f"\t||quantized_weight - optimized_weight|| / ||quantized_weight||"
                                                f" = {relative_error}\n")
                         print(end=f"Updated codes for {name}{maybe_distributed_msg}:\n\tFraction of weights with at "
-                                  f"least one code change: {code_change_rate:.8f} "
+                        #           f"least one code change: {code_change_rate:.8f} "
                                   f"{maybe_limit_msg}{maybe_individual_msg}\n{maybe_delta_msg}\n")
         assert len(remaining_quantized_weights) == 0
 
@@ -397,8 +399,9 @@ class StraightThroughAdamW(ConfigurableAdamW):
 
         straight_through_buffers = state_dict.pop("straight_through_buffers")
         assert all(name in straight_through_buffers for name in self.straight_through_buffer_by_name)
-        for name, loaded_values in straight_through_buffers.items():
-            self.straight_through_buffer_by_name[name][...] = loaded_values
+        with torch.no_grad():
+            for name, loaded_values in straight_through_buffers.items():
+                self.straight_through_buffer_by_name[name][...] = loaded_values
         super().load_state_dict(state_dict)
 
 
