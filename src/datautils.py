@@ -19,8 +19,8 @@ def set_seed(seed: Optional[int]):
     torch.random.manual_seed(seed)
 
 
-# for personal test
 def get_red_pajama_dataset(nsamples, seqlen, tokenizer, split='train'):
+    """Quantization with AutoGPTQ requires this format"""
     traindata = load_dataset("togethercomputer/RedPajama-Data-1T-Sample", split=split)
     tokenizer.bos_token_id = 1
     tokenizer.eos_token_id = 2

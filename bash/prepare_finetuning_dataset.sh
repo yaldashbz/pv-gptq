@@ -1,10 +1,10 @@
 TARGET_MODEL=TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T  # used for tokenization
 # TARGET_MODEL=facebook/opt-125m
-SEQLEN=4096
+SEQLEN=2048
 DATASET=togethercomputer/RedPajama-Data-1T-Sample
 # DATASET_CONFIG=wikitext-2-raw-v1
 # DATASET=wikitext
-OUTPUT_PATH=../PV-GPTQ/pajama_tokenized_tinyllama
+OUTPUT_PATH=../PV-GPTQ/pajama_tokenized_tinyllama-v2
 
 export HUGGINGFACE_TOKEN='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'
 
