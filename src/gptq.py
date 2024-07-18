@@ -7,62 +7,13 @@ from src.kmeans import find_nearest_cluster, fit_faiss_kmeans, fit_kmeans, fit_k
 from src.beam_search_xtx import beam_search_optimal_codes as beam_search_minimize_activation_mse
 from src.beam_search_l2 import beam_search_optimal_codes as beam_search_minimize_weight_mse
 from src.aq_ops import IntCodes
-
-# Copied from https://github.com/IST-DASLab/marlin/pull/1
-@torch.no_grad()
-def unpack_4bit_to_32bit_signed(qweight, qzeros):
-    # Unpack 4-bit values and interpret them as signed integers
-    unpacked_weights = torch.zeros(
-        (qweight.shape[0] * 8, qweight.shape[1]),
-        dtype=torch.int8,
-        device=qweight.device,
-        requires_grad=False,
-    )
-
-    unpacked_zeros = torch.zeros(
-        (qzeros.shape[0], qzeros.shape[1] * 8),
-        dtype=torch.int8,
-        device=qzeros.device,
-        requires_grad=False,
-    )
-
-    for row in range(unpacked_weights.shape[0]):
-        i = row % 8
-        unpacked_weights[row, :] = (qweight[row // 8, :] >> (4 * i)) & 0xF
-
-    for col in range(unpacked_zeros.shape[1]):
-        i = col % 8
-        unpacked_zeros[:, col] = (qzeros[:, col // 8] >> (4 * i)) & 0xF
-
-    return unpacked_weights, unpacked_zeros + 1
-
-def unpack_qzeros(qzeros):
-    unpacked_zeros = torch.zeros(
-        (qzeros.shape[0], qzeros.shape[1] * 8),
-        dtype=torch.int8,
-        device=qzeros.device,
-        requires_grad=False,
-    )
-
-    for col in range(unpacked_zeros.shape[1]):
-        i = col % 8
-        unpacked_zeros[:, col] = (qzeros[:, col // 8] >> (4 * i)) & 0xF
-
-    return unpacked_zeros + 1
+from src.gptq_ops import *
 
 
-# Copied from https://github.com/IST-DASLab/marlin/pull/1
-@torch.no_grad()
-def dequantize_weight(layer):
-    qweight, qzeros, scales = layer.qweight, layer.qzeros, layer.scales
-    unpacked_qweight, unpacked_qzeros = unpack_4bit_to_32bit_signed(qweight, qzeros)
-    group_size = unpacked_qweight.shape[0] // scales.shape[0]
-    scales = scales.repeat_interleave(group_size, dim=0)
-    unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
-    unpacked_qweight = (unpacked_qweight - unpacked_qzeros) * scales
-
-    return unpacked_qweight.T, unpacked_qzeros
-
+methods = {
+    'quantlin': QuantLinear(),
+    'nf4': None
+}
 
 
 class GPTQQuantizedWeight(nn.Module):
@@ -70,7 +21,8 @@ class GPTQQuantizedWeight(nn.Module):
             self,
             refrence_layer, # quantized refrence layer (int32)
             scale_nbits: int = 0,
-            straight_through_gradient: Optional[bool] = None
+            straight_through_gradient: Optional[bool] = None,
+            quant_method: str = 'quantlin'
 ) -> None:
         super().__init__()
         self.scales = nn.Parameter(refrence_layer.scales, requires_grad=True)
@@ -78,8 +30,10 @@ class GPTQQuantizedWeight(nn.Module):
         self.qweight = nn.Parameter(refrence_layer.qweight, requires_grad=False)
         self.qweight_storage: Optional[IntCodes] = None  # storage for FSDP compatibility
         self.qzeros_storage: Optional[IntCodes] = None  # storage for FSDP compatibility
-
-        dequantized_weight, _ = dequantize_weight(refrence_layer)
+        
+        self._quant_method = methods[quant_method]
+        dequantized_weight = self._quant_method.dequantize_weight(
+            refrence_layer.qweight, refrence_layer.qzeros, refrence_layer.scales)
         self.out_features, self.in_features = dequantized_weight.shape
         self.scale_nbits = scale_nbits
         self.straight_through_gradient = straight_through_gradient
@@ -88,19 +42,11 @@ class GPTQQuantizedWeight(nn.Module):
     @property
     def shape(self):
         return self.out_features, self.in_features
-    
+
     def forward(self):
-        dequantized_weight = self.dequantize_weight(self.get_qweight(), self.get_qzeros(), self.get_scales())
-        dequantized_weight.requires_grad_(True)
+        dequantized_weight = self._quant_method.dequantize_weight(
+            self.get_qweight(), self.get_qzeros(), self.get_scales())
         return dequantized_weight
-    
-    def dequantize_weight(self, qweight, qzeros, scales):
-        unpacked_qweight, unpacked_qzeros = unpack_4bit_to_32bit_signed(qweight, qzeros)
-        group_size = unpacked_qweight.shape[0] // scales.shape[0]
-        scales = scales.repeat_interleave(group_size, dim=0)
-        unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
-        unpacked_qweight = (unpacked_qweight - unpacked_qzeros) * scales
-        return unpacked_qweight.T
 
     def estimate_nbits_per_parameter(self) -> float:
         # TODO
@@ -154,4 +100,28 @@ class GPTQQuantizedWeight(nn.Module):
             return dequantized_scales
         else:  # train scale codebook only
             return self.scales_clusters.gather(1, self.scales_indices)[:, :, None, None]
+        
+    def update_discretes(self, reference_weight, max_update_fraction, lr):
+        prev_qweight = self.get_qweight().clone()
+        prev_qzeros = self.get_qzeros().clone()
+        scales = self.get_scales().clone()
+        
+        qweight, qzeros = self._quant_method.update_discretes(
+            prev_qweight, prev_qzeros, scales, reference_weight, max_update_fraction, lr)
+
+        self.set_qweight(qweight)
+        self.set_qzeros(qzeros)
+        return qweight, qzeros
+
+    def set_qweight(self, new_qweight: torch.Tensor, **kwargs):
+        """Update codes[selection] to new_codes, regardless of their dtype and whether they are wrapped as storage"""
+        assert (self.qweight is None) != (self.qweight_storage is None), "must have either .codes or storage, but not both"
+        qweight = self.qweight if self.qweight is not None else self.qweight_storage()
+        qweight.copy_(new_qweight, **kwargs)
+
+    def set_qzeros(self, new_qzeros: torch.Tensor, **kwargs):
+        """Update codes[selection] to new_codes, regardless of their dtype and whether they are wrapped as storage"""
+        assert (self.qzeros is None) != (self.qzeros_storage is None), "must have either .codes or storage, but not both"
+        qzeros = self.qzeros if self.qzeros is not None else self.qzeros_storage()
+        qzeros.copy_(new_qzeros, **kwargs)
 

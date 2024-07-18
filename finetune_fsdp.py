@@ -147,6 +147,12 @@ def add_finetuning_args(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--discrete_lr",
+        type=float,
+        default=1e-2,
+        help="finetuning learning rate for discrete codes",
+    )
+    parser.add_argument(
         "--code_lr",
         type=float,
         default=1e-2,
@@ -686,11 +692,6 @@ def main():
     world_size = torch.distributed.get_world_size()
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(rank)
-    # torch.distributed.init_process_group()
-    # world_size = torch.distributed.get_world_size()
-    # rank = torch.distributed.get_rank() % torch.cuda.device_count()
-    # torch.cuda.set_device(rank)
-    # device = torch.device(f"cuda:{rank}")
 
     assert args.batch_size is not None, "please specify batch size"
     assert args.batch_size % world_size == 0
@@ -793,7 +794,8 @@ def main():
         code_trust_ratio=args.code_trust_ratio,
         beam_size=args.beam_size,
         straight_through_buffer_dtype=args.straight_through_buffer_dtype,
-        verbose=args.verbose_optimizer
+        verbose=args.verbose_optimizer,
+        discrete_lr=args.discrete_lr
     )
     del named_quantized_params
 

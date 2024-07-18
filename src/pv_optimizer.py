@@ -6,6 +6,8 @@ from typing import Optional, Dict, Tuple, List, Any, Sequence, Iterator, Union
 import torch
 import torch.nn as nn
 import torch.distributed
+
+from src.gptq_ops import *
 # from torch.optim.optimizer import StateDict
 
 from src.gptq import GPTQQuantizedWeight
@@ -82,6 +84,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
                  stochastic_rounding_tau: float = 0,
                  straight_through_buffer_dtype: Optional[torch.dtype] = None,
                  verbose: bool = False,
+                 discrete_lr: float,
                  **kwargs):
         assert 0 <= delta_decay <= 1
         assert all(isinstance(qw, (GPTQQuantizedWeight, YourQuantizedWeightIsInAnotherRank))
@@ -129,6 +132,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
         self.stochastic_rounding_tau = stochastic_rounding_tau
         self.beam_size = beam_size
         self.verbose = verbose
+        self.discrete_lr = discrete_lr
 
     def _select_optimized_parameters(
             self, named_dequantized_params, named_quantized_params, straight_through_buffer_dtype,
@@ -292,6 +296,11 @@ class StraightThroughAdamW(ConfigurableAdamW):
                     assert reference_weight.shape == quantized_weight.shape, (reference_weight.shape, quantized_weight.shape)
                     assert isinstance(quantized_weight, GPTQQuantizedWeight)
 
+                    prev_qweight = quantized_weight.get_qweight().clone()
+                    prev_qzeros = quantized_weight.get_qzeros().clone()
+                    new_qweight, new_qzeros = quantized_weight.update_discretes(
+                        reference_weight, max_update_fraction=self.max_code_change_per_step, lr=self.discrete_lr)
+
                     # prev_codes = quantized_weight.get_codes().clone()  # [num_output_groups, num_input_groups]
                     # new_codes = quantized_weight.beam_search_update_codes_(
                     #     reference_weight=reference_weight,
@@ -303,14 +312,17 @@ class StraightThroughAdamW(ConfigurableAdamW):
                     #     trust_ratio=self.code_trust_ratio,
                     #     dim_rng=random.Random(None),
                     # )  # note: this updates quantized_weight codes in-place
-                    # if self.delta_decay != 0 and self.is_straight_through:
-                    #     self.straight_through_buffer_by_name[name][...] = (
-                    #             self.delta_decay * quantized_weight() + (1 - self.delta_decay) * reference_weight
-                    #     )
-                    #     # if not is_straight_throuh, param will be properly updated in _update_dequantized_weights
+                    if self.delta_decay != 0 and self.is_straight_through:
+                        self.straight_through_buffer_by_name[name][...] = (
+                                self.delta_decay * quantized_weight() + (1 - self.delta_decay) * reference_weight
+                        )
+                        # if not is_straight_throuh, param will be properly updated in _update_dequantized_weights
 
                     if self.verbose:
-                        # code_change_rate = torch.not_equal(prev_codes, new_codes).any(-1).float().mean().item()
+                        qweight_change_rate = torch.not_equal(prev_qweight, new_qweight).any(-1).float().mean().item()
+                        qzeros_change_rate = torch.not_equal(prev_qzeros, new_qzeros).any(-1).float().mean().item()
+                        qweight_changed = not torch.equal(prev_qweight, new_qweight)
+                        qzeros_changed = not torch.equal(prev_qzeros, new_qzeros)
                         maybe_distributed_msg = ""
                         if torch.distributed.is_initialized():
                             maybe_distributed_msg = f" (rank {torch.distributed.get_rank()})"
@@ -327,9 +339,10 @@ class StraightThroughAdamW(ConfigurableAdamW):
                             delta_norm = (reference_weight - _dequantized_weight).norm().item()
                             relative_error = delta_norm / max(_dequantized_weight.norm().item(), 1e-9)
                             maybe_delta_msg = (f"\t||quantized_weight - optimized_weight|| / ||quantized_weight||"
-                                               f" = {relative_error}\n")
+                                               f" = {relative_error} , {delta_norm}\n")
                         print(end=f"Updated codes for {name}{maybe_distributed_msg}:\n\tFraction of weights with at "
-                        #           f"least one code change: {code_change_rate:.8f} "
+                                  f"least one qweight change: {qweight_change_rate}, {qweight_changed} and at "
+                                  f"least one qzeros change: {qzeros_change_rate}, {qzeros_changed} "
                                   f"{maybe_limit_msg}{maybe_individual_msg}\n{maybe_delta_msg}\n")
         assert len(remaining_quantized_weights) == 0
 
@@ -399,9 +412,8 @@ class StraightThroughAdamW(ConfigurableAdamW):
 
         straight_through_buffers = state_dict.pop("straight_through_buffers")
         assert all(name in straight_through_buffers for name in self.straight_through_buffer_by_name)
-        with torch.no_grad():
-            for name, loaded_values in straight_through_buffers.items():
-                self.straight_through_buffer_by_name[name][...] = loaded_values
+        for name, loaded_values in straight_through_buffers.items():
+            self.straight_through_buffer_by_name[name][...] = loaded_values
         super().load_state_dict(state_dict)
 
 
