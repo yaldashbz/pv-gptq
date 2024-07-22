@@ -339,7 +339,7 @@ class StraightThroughAdamW(ConfigurableAdamW):
                             delta_norm = (reference_weight - _dequantized_weight).norm().item()
                             relative_error = delta_norm / max(_dequantized_weight.norm().item(), 1e-9)
                             maybe_delta_msg = (f"\t||quantized_weight - optimized_weight|| / ||quantized_weight||"
-                                               f" = {relative_error} , {delta_norm}\n")
+                                               f" = {relative_error}\n")
                         print(end=f"Updated codes for {name}{maybe_distributed_msg}:\n\tFraction of weights with at "
                                   f"least one qweight change: {qweight_change_rate}, {qweight_changed} and at "
                                   f"least one qzeros change: {qzeros_change_rate}, {qzeros_changed} "

@@ -47,11 +47,9 @@ class QuantLinear:
             return targeted_tensor
         
 
-        _update_discrete_param(flat_indices_to_update, unpacked_qweight, qweight_grad)
-        _update_discrete_param(flat_indices_to_update, unpacked_qzeros, qzeros_grad)
+        qweight = _update_discrete_param(flat_indices_to_update, unpacked_qweight.clone().float(), qweight_grad).round().int()
+        qzeros = _update_discrete_param(flat_indices_to_update, unpacked_qzeros.clone().float(), qzeros_grad).round().int()
 
-        qweight = unpacked_qweight.round().int()
-        qzeros = unpacked_qzeros.round().int()
         qweight, qzeros = pack_32bit_to_4bit(qweight, qzeros)
         qzeros = undo_repeat_interleave(qzeros, group_size, dim=0)
 
