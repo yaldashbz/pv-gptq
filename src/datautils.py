@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.distributed
-from datasets import load_dataset
+from datasets import load_dataset, get_dataset_config_names, concatenate_datasets
 from tqdm import trange
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
@@ -17,6 +17,48 @@ def set_seed(seed: Optional[int]):
     random.seed(seed)
     np.random.seed(seed)
     torch.random.manual_seed(seed)
+
+
+def get_all_cosmopedia_dataset(args):
+    assert args.split == 'train'
+    subsets = get_dataset_config_names("HuggingFaceTB/cosmopedia")
+    dataset = concatenate_datasets([
+        load_dataset(
+            "HuggingFaceTB/cosmopedia", 
+            name, 
+            split=args.split,
+            cache_dir=args.cache_dir,
+            trust_remote_code=args.trust_remote_code,
+            num_proc=args.download_num_workers if args.download_num_workers is not None else args.num_workers,
+            streaming=False,
+        ) for name in subsets])
+    return dataset
+
+
+def get_cosmopedia_dataset(nsamples, data_path):
+    dataset = torch.load(data_path)
+    dataset = [{'input_ids': x, 'attention_mask': (x != 0).int()} for x in dataset][:nsamples]
+    return dataset
+
+
+def get_cosmopedia100k(nsamples, seqlen, tokenizer, eval_mode=False):
+    assert not eval_mode, "Only train set is supported in RedPajama"
+    traindata = load_dataset("HuggingFaceTB/cosmopedia-100k", split='train')
+    tokenizer.bos_token_id = 1
+    tokenizer.eos_token_id = 2
+    trainloader = []
+    for _ in trange(nsamples, desc="Making red_pajama calibration set", leave=False):
+        while True:
+            i = random.randint(0, len(traindata) - 1)
+            trainenc = tokenizer(traindata[i]["text"], return_tensors="pt")
+            if trainenc.input_ids.shape[1] > seqlen:
+                break
+        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        j = i + seqlen
+        inp = trainenc.input_ids[:, i:j]
+        assert inp.shape[1] == seqlen
+        trainloader.append(inp)
+    return trainloader
 
 
 def get_red_pajama_dataset(nsamples, seqlen, tokenizer, split='train'):
@@ -260,6 +302,8 @@ def get_loaders(
             data = get_c4(nsamples, seqlen, tokenizer, eval_mode=eval_mode)
         elif name.lower() == "c4_new":
             data = get_c4_new(nsamples, seqlen, tokenizer, eval_mode=eval_mode)
+        elif name.lower() == "cosmopedia100k":
+            data = get_cosmopedia100k(nsamples, seqlen, tokenizer, eval_mode=eval_mode)
         else:
             raise ValueError(
                 f"Failed to load data from {name}.",
