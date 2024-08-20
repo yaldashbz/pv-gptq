@@ -23,7 +23,7 @@ from convert_legacy_model_format import load_quantized_model_with_old_pickle
 # from src.aq import QuantizedWeight
 from src.gptq import GPTQQuantizedWeight
 from src.aq_ops import IntCodes, master_rank_first, one_rank_at_a_time, is_signed
-from src.datautils import group_texts, split_long_texts, get_loaders, evaluate_perplexity
+from src.datautils import group_texts, split_long_texts, get_loaders, evaluate_perplexity, get_all_cosmopedia_dataset
 from src.modelutils import get_model
 from src.pv_utils import infer_module_classes, create_dequantized_gptq_model, \
     get_original_named_parameters_from_fsdp_module, split_quantized_weights_between_ranks, \
@@ -400,15 +400,18 @@ def prepare_training_dataset(args: argparse.Namespace, tokenizer: transformers.P
     if os.path.exists(args.dataset_name):
         dataset = datasets.load_from_disk(args.dataset_name)
     else:
-        dataset = datasets.load_dataset(
-            args.dataset_name,
-            args.dataset_config_name,
-            split=args.split,
-            cache_dir=args.cache_dir,
-            trust_remote_code=args.trust_remote_code,
-            num_proc=args.download_num_workers if args.download_num_workers is not None else args.num_workers,
-            streaming=False,
-        )
+        if args.dataset_name == 'HuggingFaceTB/cosmopedia' and args.dataset_config_name == 'all':
+            dataset = get_all_cosmopedia_dataset(args)
+        else:
+            dataset = datasets.load_dataset(
+                args.dataset_name,
+                args.dataset_config_name,
+                split=args.split,
+                cache_dir=args.cache_dir,
+                trust_remote_code=args.trust_remote_code,
+                num_proc=args.download_num_workers if args.download_num_workers is not None else args.num_workers,
+                streaming=False,
+            )
 
     def is_tokenized(dataset):
         return 'input_ids' in dataset.column_names
@@ -746,6 +749,7 @@ def main():
     }
 
     with one_rank_at_a_time(local=True, group_size=args.limit_parallel_inits):
+        print('start model dequantization ...')
         base_model = load_base_model(args, device)
         dequantized_model, named_quantized_params = load_dequantized_model(args, device)
         if rank == 0:
@@ -766,8 +770,8 @@ def main():
             else:
                 assert isinstance(quantized_weight, YourQuantizedWeightIsInAnotherRank)
 
-    # named_dequantized_param is tensor
-    # named_quantized_param is GPTQQuantizedWeight
+    # named_dequantized_params is tensor
+    # named_quantized_params is GPTQQuantizedWeight
     optimizer = StraightThroughAdamW(
         named_dequantized_params=named_dequantized_params,
         named_quantized_params=named_quantized_params,
