@@ -2,10 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import List, Optional, Union, Tuple
-from src.kmeans import find_nearest_cluster, fit_faiss_kmeans, fit_kmeans, fit_kmeans_1d
-from src.beam_search_xtx import beam_search_optimal_codes as beam_search_minimize_activation_mse
-from src.beam_search_l2 import beam_search_optimal_codes as beam_search_minimize_weight_mse
+from typing import Optional
 from src.aq_ops import IntCodes
 from src.gptq_ops import *
 
@@ -32,20 +29,24 @@ class GPTQQuantizedWeight(nn.Module):
         self.qzeros_storage: Optional[IntCodes] = None  # storage for FSDP compatibility
         
         self._quant_method = methods[quant_method]
-        dequantized_weight = self._quant_method.dequantize_weight(
-            refrence_layer.qweight, refrence_layer.qzeros, refrence_layer.scales)
-        self.out_features, self.in_features = dequantized_weight.shape
+        self.out_features, self.in_features = None, None
         self.scale_nbits = scale_nbits
         self.straight_through_gradient = straight_through_gradient
         self.scales_are_lossless = scale_nbits == 0
     
     @property
     def shape(self):
+        assert self.out_features and self.in_features
         return self.out_features, self.in_features
+
+    def freeze_scales(self):
+        self.scales.requires_grad = False
 
     def forward(self):
         dequantized_weight = self._quant_method.dequantize_weight(
             self.get_qweight(), self.get_qzeros(), self.get_scales())
+        if self.out_features is None:
+            self.out_features, self.in_features = dequantized_weight.shape
         return dequantized_weight
 
     def estimate_nbits_per_parameter(self) -> float:
@@ -87,19 +88,20 @@ class GPTQQuantizedWeight(nn.Module):
 
     def get_scales(self) -> torch.Tensor:
         """Get per-channel or per-group quantization scales or reconstruct those scales based on scales_nbits"""
-        if self.scale_nbits == 0 or self.scales_are_lossless:
-            return self.scales  # scales are not quantized or the quantization is lossless
-        elif self.straight_through_gradient:
-            with torch.no_grad():
-                self.scales_clusters, _, dequantized_scales = fit_kmeans_1d(
-                    self.scales.flatten(1, -1), k=2**self.scale_nbits, initial_clusters=self.scales_clusters
-                )
-                dequantized_scales = dequantized_scales.reshape_as(self.scales)
-            if torch.is_grad_enabled() and self.scales.requires_grad:
-                dequantized_scales = dequantized_scales + (self.scales - self.scales.detach())
-            return dequantized_scales
-        else:  # train scale codebook only
-            return self.scales_clusters.gather(1, self.scales_indices)[:, :, None, None]
+        return self.scales
+        # if self.scale_nbits == 0 or self.scales_are_lossless:
+        #     return self.scales  # scales are not quantized or the quantization is lossless
+        # elif self.straight_through_gradient:
+        #     with torch.no_grad():
+        #         self.scales_clusters, _, dequantized_scales = fit_kmeans_1d(
+        #             self.scales.flatten(1, -1), k=2**self.scale_nbits, initial_clusters=self.scales_clusters
+        #         )
+        #         dequantized_scales = dequantized_scales.reshape_as(self.scales)
+        #     if torch.is_grad_enabled() and self.scales.requires_grad:
+        #         dequantized_scales = dequantized_scales + (self.scales - self.scales.detach())
+        #     return dequantized_scales
+        # else:  # train scale codebook only
+        #     return self.scales_clusters.gather(1, self.scales_indices)[:, :, None, None]
         
     def update_discretes(self, reference_weight, max_update_fraction, lr):
         prev_qweight = self.get_qweight().clone()

@@ -58,12 +58,12 @@ def create_dequantized_gptq_model(
                     dequantized_module.bias[...] = module.bias
                     dequantized_module.bias.requires_grad = dequantized_module.bias.requires_grad
                 elif module.bias is not None and reuse_non_quantized:
-                    dequantized_module.bias = module.bias
+                    dequantized_module.bias[...] = module.bias
 
             memo[id(module)] = dequantized_module
             master_parameters[f"{name}.weight"] = quantized_weight
-            if dequantized_module.bias is not module.bias:
-                master_parameters[f"{name}.bias"] = module.bias
+            # if dequantized_module.bias is not module.bias:
+                # master_parameters[f"{name}.bias"] = module.bias
             all_quantized_weight_parameters |= set(quantized_weight.parameters())
             assert all(param in {dequantized_module.weight, dequantized_module.bias}
                        for param in dequantized_module.parameters())

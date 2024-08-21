@@ -1,14 +1,40 @@
-export MODEL_PATH=TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T  # path or huggingface id of the base model
-export QUANTIZED_MODEL_PATH=../PV-GPTQ/Tiny-llama-4bit-v2 # path to the model created by initial calibration
-export TOKENIZED_DATASET_PATH=../PV-GPTQ/pajama_tokenized_tinyllama-v2  # yet again, red pajama adviced
-export CACHE_DIR=../PV-GPTQ/cache_dir
-export SNAPSHOT_PATH=../PV-GPTQ/pv_model_p-rtn
-export SEQLEN=2048
-export NUM_GPUS=4
+#!/bin/bash
+#SBATCH --job-name=layernorm-llama3.1-pajama-static
+#SBATCH --output=../layernorm-llama3.1-pajama-1e-4.out
+#SBATCH --error=../layernorm-llama3.1-pajama-1e-4.err
+
+#number of CPUs to be used
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+
+#Define the number of hours the job should run.
+#SBATCH --time=36:00:00
+
+#Define the amount of system RAM used by your job in GigaBytes
+#SBATCH --mem=1000G
+#SBATCH --no-requeue
+
+#Define the "gpu" partition for GPU-accelerated jobs
+#SBATCH --partition=gpu100
+#Define the number of GPUs used by your job
+#SBATCH --gres=gpu:8
+
+
+# Llama-3.1-8B
+export NAME='Meta-Llama-3.1-8B-Instruct-gptq4-128-True-seed1_mse_static'
+export SEQLEN=8192
+export SAVE_NAME=$NAME\_test_p_1e-4_pajama_$SEQLEN
+export MODEL_PATH=meta-llama/Meta-Llama-3.1-8B-Instruct
+export QUANTIZED_MODEL_PATH=/nfs/scistore19/alistgrp/amoeini/saved/$NAME # path to the model created by initial calibration
+export TOKENIZED_DATASET_PATH=/nfs/scistore19/alistgrp/yshabanz/data/pajama_tokenized_llama3.1-8b-instruct_$SEQLEN  # yet again, red pajama adviced
+export CACHE_DIR=/nfs/scistore19/alistgrp/yshabanz/cache_dir
+export SNAPSHOT_PATH=/nfs/scistore19/alistgrp/yshabanz/saved/$SAVE_NAME
+export NUM_GPUS=8
 
 export WANDB_PROJECT=pv-gptq
-export WANDB_NAME=tinyllama_pajama_p-rtn_tuning
+export WANDB_NAME=$SAVE_NAME
 export HUGGINGFACE_TOKEN='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'
+export HF_TOKEN=$HUGGINGFACE_TOKEN
 
 
 torchrun --nproc-per-node=$NUM_GPUS finetune_fsdp.py \
@@ -19,9 +45,9 @@ torchrun --nproc-per-node=$NUM_GPUS finetune_fsdp.py \
     --dataset_name=$TOKENIZED_DATASET_PATH --split none --seed 1337 \
     --preprocessing_chunk_length 100000 --cache_dir=$CACHE_DIR --trust_remote_code \
     --update_codes --update_codebooks_and_scales --update_non_quantized_parameters \
-    --lamb --debias --lr 3e-4 --adam_beta1 0.9 --adam_beta2 0.95 \
-    --discrete_lr 1e3 --code_lr 3e-3 --code_beta1 0.0 --code_beta2 0.95 --beam_size 1 --delta_decay 0 \
+    --lamb --debias --lr 1e-4 --adam_beta1 0.9 --adam_beta2 0.95 \
+    --discrete_lr 0 --code_lr 3e-3 --code_beta1 0.0 --code_beta2 0.95 --beam_size 1 --delta_decay 0 \
     --max_code_change_per_step 5e-5 --code_trust_ratio 1e-2 --code_selection_temperature 0 \
-    --batch_size=256 --microbatch_size=8 --max_epochs 10 --gradient_checkpointing \
+    --batch_size=128 --microbatch_size=1 --max_epochs 10 --gradient_checkpointing \
     --print_every_steps=1 --verbose_optimizer  --eval_every_steps=10 --keep_best_model --wandb \
     --save $SNAPSHOT_PATH --save_every_steps 100

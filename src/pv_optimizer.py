@@ -296,10 +296,11 @@ class StraightThroughAdamW(ConfigurableAdamW):
                     assert reference_weight.shape == quantized_weight.shape, (reference_weight.shape, quantized_weight.shape)
                     assert isinstance(quantized_weight, GPTQQuantizedWeight)
 
-                    prev_qweight = quantized_weight.get_qweight().clone()
-                    prev_qzeros = quantized_weight.get_qzeros().clone()
-                    new_qweight, new_qzeros = quantized_weight.update_discretes(
-                        reference_weight, max_update_fraction=self.max_code_change_per_step, lr=self.discrete_lr)
+                    # prev_qweight = quantized_weight.get_qweight().clone()
+
+                    if self.discrete_lr:
+                        new_qweight, new_qzeros = quantized_weight.update_discretes(
+                            reference_weight, max_update_fraction=self.max_code_change_per_step, lr=self.discrete_lr)
 
                     # prev_codes = quantized_weight.get_codes().clone()  # [num_output_groups, num_input_groups]
                     # new_codes = quantized_weight.beam_search_update_codes_(
@@ -319,10 +320,8 @@ class StraightThroughAdamW(ConfigurableAdamW):
                         # if not is_straight_throuh, param will be properly updated in _update_dequantized_weights
 
                     if self.verbose:
-                        qweight_change_rate = torch.not_equal(prev_qweight, new_qweight).any(-1).float().mean().item()
-                        qzeros_change_rate = torch.not_equal(prev_qzeros, new_qzeros).any(-1).float().mean().item()
-                        qweight_changed = not torch.equal(prev_qweight, new_qweight)
-                        qzeros_changed = not torch.equal(prev_qzeros, new_qzeros)
+                        # qweight_change_rate = torch.not_equal(prev_qweight, new_qweight).any(-1).float().mean().item()
+                        # qweight_changed = not torch.equal(prev_qweight, new_qweight)
                         maybe_distributed_msg = ""
                         if torch.distributed.is_initialized():
                             maybe_distributed_msg = f" (rank {torch.distributed.get_rank()})"
@@ -341,8 +340,8 @@ class StraightThroughAdamW(ConfigurableAdamW):
                             maybe_delta_msg = (f"\t||quantized_weight - optimized_weight|| / ||quantized_weight||"
                                                f" = {relative_error}\n")
                         print(end=f"Updated codes for {name}{maybe_distributed_msg}:\n\tFraction of weights with at "
-                                  f"least one qweight change: {qweight_change_rate}, {qweight_changed} and at "
-                                  f"least one qzeros change: {qzeros_change_rate}, {qzeros_changed} "
+                                #   f"least one qweight change: {qweight_change_rate}, {qweight_changed} and at "
+                                #   f"least one qzeros change: {qzeros_change_rate}, {qzeros_changed} "
                                   f"{maybe_limit_msg}{maybe_individual_msg}\n{maybe_delta_msg}\n")
         assert len(remaining_quantized_weights) == 0
 
