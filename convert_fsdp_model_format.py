@@ -1,8 +1,8 @@
-import os
 import argparse
-import torch
-
+import os
 from pathlib import Path
+
+import torch
 from auto_gptq import AutoGPTQForCausalLM
 
 
@@ -42,15 +42,15 @@ def main():
     parser.add_argument("--save", type=str, required=True, help="Save the converted quantized model here")
 
     args = parser.parse_args()
-    device = torch.device('cuda:0')
+    device = torch.device("cuda:0")
 
     quantized_model = AutoGPTQForCausalLM.from_quantized(args.quantized_model, device=device)
-    weights_dir = Path(os.path.join(args.pv_fsdp_dir, 'best_model')).expanduser()
-    attributes = ['scales']
+    weights_dir = Path(os.path.join(args.pv_fsdp_dir, "best_model")).expanduser()
+    attributes = ["scales"]
 
     for weight_file in weights_dir.glob("*.pth"):
         state_dict = torch.load(weight_file)
-        if 'non_quantized_state_dict' not in weight_file.stem:
+        if "non_quantized_state_dict" not in weight_file.stem:
             for attr in attributes:
                 key_name = weight_file.stem.replace(".weight", f".{attr}")
                 if key_name in quantized_model.state_dict():
@@ -69,6 +69,5 @@ def main():
     quantized_model.save_quantized(args.save)
 
 
-
-if __name__=='__main__':
+if __name__ == "__main__":
     main()

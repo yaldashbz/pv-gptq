@@ -1,6 +1,7 @@
 """ Core mathematics for Additive Quantization (AQ): initialization, reconstruction and beam search"""
 from __future__ import annotations
-from typing import List, Optional, Union, Tuple
+
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -8,9 +9,9 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from tqdm.auto import trange
 
-from src.aq_ops import _dequantize_weight, ellipsis, IntCodes, is_signed
-from src.beam_search_xtx import beam_search_optimal_codes as beam_search_minimize_activation_mse
+from src.aq_ops import IntCodes, _dequantize_weight, ellipsis, is_signed
 from src.beam_search_l2 import beam_search_optimal_codes as beam_search_minimize_weight_mse
+from src.beam_search_xtx import beam_search_optimal_codes as beam_search_minimize_activation_mse
 from src.kmeans import find_nearest_cluster, fit_faiss_kmeans, fit_kmeans, fit_kmeans_1d
 
 
@@ -237,7 +238,7 @@ class QuantizedWeight(nn.Module):
         prev_codes = self.get_codes()[selection]
         scales = self.get_scales()[selection]
         if XTX is not None:
-             new_codes = beam_search_minimize_activation_mse(
+            new_codes = beam_search_minimize_activation_mse(
                 XTX=XTX,
                 reference_weight=reference_weight,
                 codebooks=codebooks,
@@ -247,11 +248,7 @@ class QuantizedWeight(nn.Module):
             )
         else:
             new_codes = beam_search_minimize_weight_mse(
-                reference_weight=reference_weight,
-                codebooks=codebooks,
-                prev_codes=prev_codes,
-                scales=scales,
-                **kwargs
+                reference_weight=reference_weight, codebooks=codebooks, prev_codes=prev_codes, scales=scales, **kwargs
             )
         self.set_codes(new_codes, selection)
         return new_codes

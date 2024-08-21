@@ -1,5 +1,6 @@
-import torch
 import math
+
+import torch
 
 
 class QuantLinear:
@@ -11,7 +12,6 @@ class QuantLinear:
         unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
         unpacked_qweight = (unpacked_qweight - unpacked_qzeros) * scales
         return unpacked_qweight.T
-
 
     @staticmethod
     def update_discretes(prev_qweight, prev_qzeros, new_scales, reference_weight, max_update_fraction, lr):
@@ -26,10 +26,11 @@ class QuantLinear:
         qweight = unpacked_qweight - lr * qweight_grad
         qzeros = unpacked_qzeros - lr * qzeros_grad
         """
-        in_group_size, out_group_size = group_size, 1   # for GPTQ
+        in_group_size, out_group_size = group_size, 1  # for GPTQ
         flat_indices_to_update = get_discrete_group_indices(
-            reference_weight, out_group_size, in_group_size, max_update_fraction)
-        
+            reference_weight, out_group_size, in_group_size, max_update_fraction
+        )
+
         def _update_discrete_param(group_indices, targeted_tensor, targeted_tensor_grad):
             num_groups = reference_weight.shape[1] // group_size
 
@@ -42,13 +43,18 @@ class QuantLinear:
             end_cols = start_cols + group_size
 
             for row, start_col, end_col in zip(row_indices, start_cols, end_cols):
-                targeted_tensor[start_col:end_col, row] = targeted_tensor[start_col:end_col, row] - lr * targeted_tensor_grad[start_col:end_col, row]
-            
-            return targeted_tensor
-        
+                targeted_tensor[start_col:end_col, row] = (
+                    targeted_tensor[start_col:end_col, row] - lr * targeted_tensor_grad[start_col:end_col, row]
+                )
 
-        qweight = _update_discrete_param(flat_indices_to_update, unpacked_qweight.clone().float(), qweight_grad).round().int()
-        qzeros = _update_discrete_param(flat_indices_to_update, unpacked_qzeros.clone().float(), qzeros_grad).round().int()
+            return targeted_tensor
+
+        qweight = (
+            _update_discrete_param(flat_indices_to_update, unpacked_qweight.clone().float(), qweight_grad).round().int()
+        )
+        qzeros = (
+            _update_discrete_param(flat_indices_to_update, unpacked_qzeros.clone().float(), qzeros_grad).round().int()
+        )
 
         qweight, qzeros = pack_32bit_to_4bit(qweight, qzeros)
         qzeros = undo_repeat_interleave(qzeros, group_size, dim=0)
@@ -59,30 +65,32 @@ class QuantLinear:
 
 
 def get_discrete_group_indices(
-        reference_weight: torch.Tensor, 
-        out_group_size: int,
-        in_group_size: int,
-        max_update_fraction: float = .01
-    ):
-        num_output_groups = reference_weight.shape[0] // out_group_size
-        num_input_groups = reference_weight.shape[1] // in_group_size
-        num_codes_to_update = int(math.ceil(max_update_fraction * num_output_groups * num_input_groups))
-        difference_with_reference_squared_norms = groupwise_squared_norms(
-            reference_weight.grad, out_group_size, in_group_size)
-        # ^-- [num_output_groups, num_input_groups]
-        flat_indices_to_update = torch.topk(difference_with_reference_squared_norms.flatten(),
-                                                k=num_codes_to_update, largest=True, sorted=True).indices
-        
-        return flat_indices_to_update
+    reference_weight: torch.Tensor, out_group_size: int, in_group_size: int, max_update_fraction: float = 0.01
+):
+    num_output_groups = reference_weight.shape[0] // out_group_size
+    num_input_groups = reference_weight.shape[1] // in_group_size
+    num_codes_to_update = int(math.ceil(max_update_fraction * num_output_groups * num_input_groups))
+    difference_with_reference_squared_norms = groupwise_squared_norms(
+        reference_weight.grad, out_group_size, in_group_size
+    )
+    # ^-- [num_output_groups, num_input_groups]
+    flat_indices_to_update = torch.topk(
+        difference_with_reference_squared_norms.flatten(), k=num_codes_to_update, largest=True, sorted=True
+    ).indices
+
+    return flat_indices_to_update
 
 
 def groupwise_squared_norms(delta: torch.Tensor, out_group_size: int, in_group_size: int):
-        """
-        Given a matrix delta [out_features, in_features], compute a tensor [num_output_groups, num_input_groups] that
-        contains the squared sum of elements of delta from each tile of (out_group_size, in_group_size) values.
-        """
-        return delta.view(delta.shape[0] // out_group_size, out_group_size,
-                          delta.shape[1] // in_group_size, in_group_size).square().sum(dim=(1, 3))
+    """
+    Given a matrix delta [out_features, in_features], compute a tensor [num_output_groups, num_input_groups] that
+    contains the squared sum of elements of delta from each tile of (out_group_size, in_group_size) values.
+    """
+    return (
+        delta.view(delta.shape[0] // out_group_size, out_group_size, delta.shape[1] // in_group_size, in_group_size)
+        .square()
+        .sum(dim=(1, 3))
+    )
 
 
 def undo_repeat_interleave(repeated_tensor: torch.Tensor, repeats: int, dim=0):
@@ -162,30 +170,30 @@ def pack_32bit_to_4bit(unpacked_weights, unpacked_qzeros):
     # Calculate the size of packed tensors
     packed_weight_shape = (unpacked_weights.shape[0] // 8, unpacked_weights.shape[1])
     packed_zeros_shape = (unpacked_qzeros.shape[0], unpacked_qzeros.shape[1] // 8)
-    
+
     # Initialize packed tensors
     qweights = torch.zeros(
         packed_weight_shape,
         dtype=torch.int32,  # We'll use int32 to accommodate the packed 4-bit values
         device=unpacked_weights.device,
-        requires_grad=False
+        requires_grad=False,
     )
-    
+
     qzeros = torch.zeros(
         packed_zeros_shape,
         dtype=torch.int32,  # We'll use int32 to accommodate the packed 4-bit values
         device=unpacked_qzeros.device,
-        requires_grad=False
+        requires_grad=False,
     )
-    
+
     # Pack the weights
     for row in range(packed_weight_shape[0]):
         for i in range(8):
             qweights[row, :] |= (unpacked_weights[row * 8 + i, :] & 0xF) << (4 * i)
-    
+
     # Pack the zeros
     for col in range(packed_zeros_shape[1]):
         for i in range(8):
             qzeros[:, col] |= (unpacked_qzeros[:, col * 8 + i] - 1 & 0xF) << (4 * i)
-    
+
     return qweights, qzeros

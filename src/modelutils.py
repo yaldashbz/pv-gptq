@@ -1,6 +1,8 @@
 import math
 import os
+import re
 from contextlib import contextmanager
+from typing import Sequence
 
 import torch
 import torch.nn as nn
@@ -49,7 +51,10 @@ def get_model(
     token = os.getenv("HUGGINGFACE_TOKEN")
     if dtype == "auto":
         dtype = (
-            AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code, use_auth_token=token).torch_dtype or "auto"
+            AutoConfig.from_pretrained(
+                model_path, trust_remote_code=trust_remote_code, use_auth_token=token
+            ).torch_dtype
+            or "auto"
         )  # force transformers 4.29.2 to follow the same rules as 4.30.x
     elif isinstance(dtype, str):
         dtype = getattr(torch, dtype)
@@ -232,7 +237,7 @@ def load_dequantized_model(model, load_path):
         quant_layer = torch.load(os.path.join(load_path, str(layer_index) + ".pth"), map_location="cpu")
         for module in quant_layer.modules():
             if isinstance(module, QuantizedWeight):
-                if not hasattr(module, 'codes_storage'):
+                if not hasattr(module, "codes_storage"):
                     module.codes_storage = None  # backwards compatibility
         layers[layer_index] = load_linear_layers(layer, quant_layer, model)
     model.load_state_dict(torch.load(os.path.join(load_path, "not_quantized_weights.pt")), strict=False)
@@ -249,7 +254,7 @@ def load_quantized_model(model, load_path):
         )
         for module in model.model.layers[layer_index].modules():
             if isinstance(module, QuantizedWeight):
-                if not hasattr(module, 'codes_storage'):
+                if not hasattr(module, "codes_storage"):
                     module.codes_storage = None  # backwards compatibility
 
     model.load_state_dict(torch.load(os.path.join(load_path, "not_quantized_weights.pt")), strict=False)
@@ -274,3 +279,46 @@ def save_quantized_model(model: transformers.PreTrainedModel, save_dir: str):
         layer_save_path = os.path.join(save_dir, f"{layer_index}.pth")
         torch.save(layer, layer_save_path)
     save_not_quantized_weights(model, save_dir)
+
+
+class FeatureExtractorWrapper(nn.Module):
+    def __init__(self, model: nn.Module, module_regex: str):
+        super().__init__()
+        self.model = model
+        self.cache_features = False  # if True - cache features
+        self.forward_hooks = {}
+        self.cached_features = {}
+        for module_name, module in self.model.named_modules():
+            # Remove _fsdp parts from module name
+            module_name = ".".join([x for x in module_name.split(".") if x != "_fsdp_wrapped_module"])
+            if re.search(module_regex, module_name):
+
+                def cache_output(mod_name):
+                    def hook(mod, inputs, outputs):
+                        if self.cache_features:
+                            if isinstance(outputs, Sequence):
+                                outputs = outputs[0]
+                            self.cached_features[mod_name] = outputs
+
+                    return hook
+
+                self.forward_hooks[module_name] = module.register_forward_hook(cache_output(module_name))
+
+    def clean_cache(self):
+        self.cached_features = {}
+
+    def clean_all(self):
+        for _, hook in self.forward_hooks():
+            hook.remove()
+        self.cached_features = {}
+
+    def forward(self, *input_args, **input_kwargs):
+        output = self.model(*input_args, **input_kwargs)
+        output.features = self.cached_features
+        return output
+
+
+def maybe_unwrap_feature_extractor(model: nn.Module) -> nn.Module:
+    if isinstance(model, FeatureExtractorWrapper):
+        return model.model
+    return model

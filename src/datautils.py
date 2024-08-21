@@ -5,9 +5,9 @@ from typing import Optional, Sequence
 
 import numpy as np
 import torch
-from torch import nn
 import torch.distributed
-from datasets import load_dataset, get_dataset_config_names, concatenate_datasets
+from datasets import concatenate_datasets, get_dataset_config_names, load_dataset
+from torch import nn
 from tqdm import trange
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
@@ -20,34 +20,38 @@ def set_seed(seed: Optional[int]):
 
 
 def get_all_cosmopedia_dataset(args):
-    assert args.split == 'train'
+    assert args.split == "train"
     subsets = get_dataset_config_names("HuggingFaceTB/cosmopedia")
-    dataset = concatenate_datasets([
-        load_dataset(
-            "HuggingFaceTB/cosmopedia", 
-            name, 
-            split=args.split,
-            cache_dir=args.cache_dir,
-            trust_remote_code=args.trust_remote_code,
-            num_proc=args.download_num_workers if args.download_num_workers is not None else args.num_workers,
-            streaming=False,
-        ) for name in subsets])
+    dataset = concatenate_datasets(
+        [
+            load_dataset(
+                "HuggingFaceTB/cosmopedia",
+                name,
+                split=args.split,
+                cache_dir=args.cache_dir,
+                trust_remote_code=args.trust_remote_code,
+                num_proc=args.download_num_workers if args.download_num_workers is not None else args.num_workers,
+                streaming=False,
+            )
+            for name in subsets
+        ]
+    )
     return dataset
 
 
 def get_cosmopedia_dataset(nsamples, data_path):
     dataset = torch.load(data_path)
-    dataset = [{'input_ids': x, 'attention_mask': (x != 0).int()} for x in dataset][:nsamples]
+    dataset = [{"input_ids": x, "attention_mask": (x != 0).int()} for x in dataset][:nsamples]
     return dataset
 
 
 def get_cosmopedia100k(nsamples, seqlen, tokenizer, eval_mode=False):
     assert not eval_mode, "Only train set is supported in RedPajama"
-    traindata = load_dataset("HuggingFaceTB/cosmopedia-100k", split='train')
+    traindata = load_dataset("HuggingFaceTB/cosmopedia-100k", split="train")
     tokenizer.bos_token_id = 1
     tokenizer.eos_token_id = 2
     trainloader = []
-    for _ in trange(nsamples, desc="Making red_pajama calibration set", leave=False):
+    for _ in trange(nsamples, desc="Making cosmopedia-100k calibration set", leave=False):
         while True:
             i = random.randint(0, len(traindata) - 1)
             trainenc = tokenizer(traindata[i]["text"], return_tensors="pt")
@@ -59,27 +63,6 @@ def get_cosmopedia100k(nsamples, seqlen, tokenizer, eval_mode=False):
         assert inp.shape[1] == seqlen
         trainloader.append(inp)
     return trainloader
-
-
-def get_red_pajama_dataset(nsamples, seqlen, tokenizer, split='train'):
-    """Quantization with AutoGPTQ requires this format"""
-    traindata = load_dataset("togethercomputer/RedPajama-Data-1T-Sample", split=split)
-    tokenizer.bos_token_id = 1
-    tokenizer.eos_token_id = 2
-    traindataset = []
-    for _ in trange(nsamples, desc="Making red_pajama calibration set", leave=False):
-        while True:
-            i = random.randint(0, len(traindata) - 1)
-            trainenc = tokenizer(traindata[i]["text"], return_tensors="pt")
-            if trainenc.input_ids.shape[1] > seqlen:
-                break
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        inp = trainenc.input_ids[:, i:j]
-        attention_mask = torch.ones_like(inp)
-        traindataset.append({'input_ids':inp,'attention_mask': attention_mask})
-
-    return traindataset
 
 
 def get_red_pajama(nsamples, seqlen, tokenizer, eval_mode=False):
@@ -322,12 +305,12 @@ def split_long_texts(inputs: Sequence[str], split_max_length: int):
     outputs = []
     for index, input_str in enumerate(inputs):
         while True:
-            truncation_index = input_str.find('\n', split_max_length)
+            truncation_index = input_str.find("\n", split_max_length)
             if truncation_index == -1:
                 outputs.append(input_str)
                 break
             outputs.append(input_str[:truncation_index])
-            input_str = input_str[truncation_index + 1:]  # continue after \n
+            input_str = input_str[truncation_index + 1 :]  # continue after \n
     return outputs
 
 
@@ -342,8 +325,7 @@ def group_texts(examples: Sequence[Sequence[int]], block_size: int, add_labels: 
     total_length = (total_length // block_size) * block_size
     # Split by chunks of max_len.
     result = {
-        k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
-        for k, t in concatenated_examples.items()
+        k: [t[i : i + block_size] for i in range(0, total_length, block_size)] for k, t in concatenated_examples.items()
     }
     if add_labels:
         result["labels"] = result["input_ids"].copy()
@@ -352,18 +334,15 @@ def group_texts(examples: Sequence[Sequence[int]], block_size: int, add_labels: 
 
 @torch.inference_mode()
 def evaluate_perplexity(
-        model: nn.Module,
-        data: torch.Tensor,
-        seqlen: int,
-        device: torch.device,
-        amp_dtype: Optional[torch.dtype] = None) -> float:
+    model: nn.Module, data: torch.Tensor, seqlen: int, device: torch.device, amp_dtype: Optional[torch.dtype] = None
+) -> float:
     """Perplexity evaluation as per https://github.com/IST-DASLab/gptq (standard among quantization research)"""
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
 
-    inps = [data[:, start: start + seqlen]
-            for start in range(0, data.shape[1], seqlen)
-            if start + seqlen < data.shape[1]]  # ignore last incomplete sequence as in the GPTQ paper
+    inps = [
+        data[:, start : start + seqlen] for start in range(0, data.shape[1], seqlen) if start + seqlen < data.shape[1]
+    ]  # ignore last incomplete sequence as in the GPTQ paper
     num_sequences_without_padding = len(inps)
 
     # pad sequences to be divisible by world_size for DDP/FSDP compatibility
