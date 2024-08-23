@@ -19,6 +19,24 @@ def set_seed(seed: Optional[int]):
     torch.random.manual_seed(seed)
 
 
+def reformat_mmlu(entry):
+    # Extract relevant data from the original entry
+    entry = entry['train']
+    question = entry['question']
+    choices = entry['choices']
+    answer = entry['answer']
+    subject = entry.get('subject', '')
+    
+    # Convert it to a string-based key-value format
+    new_entry = {
+        'question': question,
+        'choices': '    '.join(choices),
+        'answer': str(answer),
+        'subject': subject
+    }
+    return new_entry
+
+
 def get_all_cosmopedia_dataset(args):
     assert args.split == 'train'
     subsets = get_dataset_config_names("HuggingFaceTB/cosmopedia")

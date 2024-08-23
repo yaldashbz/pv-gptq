@@ -18,6 +18,8 @@ import torch.utils.data
 import torch.distributed
 from torch.distributed.fsdp import FullyShardedDataParallel, StateDictType, FullStateDictConfig, MixedPrecision
 from tqdm.auto import tqdm
+from datasets import Dataset
+from transformers import AutoModelForCausalLM
 
 from convert_legacy_model_format import load_quantized_model_with_old_pickle
 # from src.aq import QuantizedWeight
@@ -29,6 +31,7 @@ from src.pv_utils import infer_module_classes, create_dequantized_gptq_model, \
     get_original_named_parameters_from_fsdp_module, split_quantized_weights_between_ranks, \
     YourQuantizedWeightIsInAnotherRank
 from src.pv_optimizer import StraightThroughAdamW
+from src.datautils import reformat_mmlu
 
 from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
 
@@ -412,6 +415,8 @@ def prepare_training_dataset(args: argparse.Namespace, tokenizer: transformers.P
                 num_proc=args.download_num_workers if args.download_num_workers is not None else args.num_workers,
                 streaming=False,
             )
+            if args.dataset_name == 'cais/mmlu':
+                dataset = Dataset.from_list([reformat_mmlu(entry) for entry in dataset])
 
     def is_tokenized(dataset):
         return 'input_ids' in dataset.column_names
@@ -460,13 +465,7 @@ def load_base_model(args: argparse.Namespace, device: torch.device, is_fsdp: boo
     #     args.base_model, load_quantized=None, dtype=args.load_dtype, trust_remote_code=args.trust_remote_code,
     #     attn_implementation=args.attn_implementation,
     # ).to(dtype=args.load_dtype if args.load_dtype != 'auto' else None)
-    # TODO: move to param
-    quantize_config = BaseQuantizeConfig(
-        bits=4,  # quantize model to 4-bit
-        group_size=128,  # it is recommended to set the value to 128
-        desc_act=False,  # set to False can significantly speed up inference but the perplexity may slightly bad
-    )
-    base_model = AutoGPTQForCausalLM.from_pretrained(args.base_model, quantize_config)
+    base_model = AutoModelForCausalLM.from_pretrained(args.base_model)
     base_model.train(False)
     for param in base_model.parameters():
         param.requires_grad = False
