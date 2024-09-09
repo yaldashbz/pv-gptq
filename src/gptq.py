@@ -1,26 +1,120 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import bitsandbytes as bnb
+
+from abc import ABC, abstractmethod
 
 from typing import Optional
 from src.aq_ops import IntCodes
-from src.gptq_ops import *
+from src.gptq_ops import (
+    get_discrete_group_indices, unpack_4bit_to_32bit_signed, 
+    pack_32bit_to_4bit, undo_repeat_interleave
+)
 
 
-methods = {
-    'quantlin': QuantLinear(),
-    'nf4': None
-}
+class GPTQQuantizedWeight(ABC, nn.Module):
+    @staticmethod
+    def create_quantized_weight(quant_class, reference_layer):
+        return quant_class(reference_layer)
+
+    @staticmethod
+    def get_quant_class(model):
+        for _, module in model.named_modules():
+            if 'QuantLinear' in str(module.__class__):
+                return QuantLinearQuantizedWeight, 'QuantLinear'
+            if 'LinearNF4' in str(module.__class__):
+                return LinearNF4QuantizedWeight, 'LinearNF4'
+        raise ValueError("Not quantized! or not supported method.")
+    
+    def estimate_nbits_per_parameter(self) -> float:
+        # TODO
+        """Calculate the effective number of bits per original matrix parameters"""
+        return 4
+    
+    @abstractmethod
+    def wrap_params_for_fsdp_(self, **kwargs):
+        """Make this  compatible with FullyShardedDataParallel; modifies state dict in-place"""
+        raise NotImplementedError
+    
+    @abstractmethod
+    def unwrap_params_(self):
+        """Undo the effect of wrap_params_for_fsdp_; modifies state dict in-place"""
+        raise NotImplementedError
+    
+    @abstractmethod
+    def update_discretes(self, reference_weight, max_update_fraction, lr):
+        raise NotImplementedError
 
 
-class GPTQQuantizedWeight(nn.Module):
+
+class LinearNF4QuantizedWeight(GPTQQuantizedWeight):
+    def __init__(
+            self,
+            refrence_layer, # quantized refrence layer (NF4)
+    ) -> None:
+        super().__init__()
+        # self.quant_state = refrence_layer.weight.quant_state
+        self.absmax = nn.Parameter(refrence_layer.weight.quant_state.absmax, requires_grad=True)
+        self.nf4weight = nn.Parameter(refrence_layer.weight.data, requires_grad=False)
+        self.nf4weight_storage: Optional[IntCodes] = None  # storage for FSDP compatibility
+
+        self.out_features, self.in_features = refrence_layer.weight.quant_state.shape
+        self.blocksize = refrence_layer.weight.quant_state.blocksize
+        self.dtype = refrence_layer.weight.quant_state.dtype
+    
+    @property
+    def shape(self):
+        return self.out_features, self.in_features
+    
+    def forward(self):
+        # assert self.quant_state.absmax.requires_grad
+        nf4weight = self.get_nf4weight()
+        dequantized_weight = torch.empty(
+            (self.out_features, self.in_features), dtype=self.dtype, device=nf4weight.device, requires_grad=True)
+        bnb.functional.dequantize_nf4(
+            A=nf4weight, 
+            absmax=self.absmax,
+            out=dequantized_weight,
+            blocksize=self.blocksize
+        )
+        return dequantized_weight
+    
+    def wrap_params_for_fsdp_(self, **kwargs):
+        """Make this  compatible with FullyShardedDataParallel; modifies state dict in-place"""
+        assert self.nf4weight is not None and self.nf4weight_storage is None
+        self.nf4weight_storage, self.nf4weight = IntCodes(self.nf4weight, **kwargs), None
+    
+    def unwrap_params_(self):
+        """Undo the effect of wrap_params_for_fsdp_; modifies state dict in-place"""
+        assert self.nf4weight is None and self.nf4weight_storage is not None
+        self.nf4weight, self.nf4weight_storage = nn.Parameter(self.nf4weight_storage(), requires_grad=False), None
+    
+    def get_nf4weight(self) -> torch.IntTensor:
+        """Get a non view to qweight, regardless of how codes are stored"""
+        assert (self.nf4weight is None) != (self.nf4weight_storage is None), "must have either .codes or storage, but not both"
+        nf4weight = self.nf4weight if self.nf4weight is not None else self.nf4weight_storage()
+        if torch.iinfo(nf4weight.dtype).bits < 32:
+            nf4weight = nf4weight.to(torch.int32)  # cast to int32 to allow indexing if codes are int16 or uint8
+        return nf4weight
+    
+    def set_nf4weight(self, new_nf4weight: torch.Tensor, **kwargs):
+        """Update codes[selection] to new_codes, regardless of their dtype and whether they are wrapped as storage"""
+        assert (self.nf4weight is None) != (self.nf4weight_storage is None), "must have either .codes or storage, but not both"
+        nf4weight = self.nf4weight if self.nf4weight is not None else self.nf4weight_storage()
+        nf4weight.copy_(new_nf4weight, **kwargs)
+
+    def update_discretes(self, reference_weight, max_update_fraction, lr):
+        pass
+
+
+class QuantLinearQuantizedWeight(GPTQQuantizedWeight):
     def __init__(
             self,
             refrence_layer, # quantized refrence layer (int32)
             scale_nbits: int = 0,
-            straight_through_gradient: Optional[bool] = None,
-            quant_method: str = 'quantlin'
-) -> None:
+            straight_through_gradient: Optional[bool] = None
+    ) -> None:
         super().__init__()
         self.scales = nn.Parameter(refrence_layer.scales, requires_grad=True)
         self.qzeros = nn.Parameter(refrence_layer.qzeros, requires_grad=False)
@@ -28,7 +122,6 @@ class GPTQQuantizedWeight(nn.Module):
         self.qweight_storage: Optional[IntCodes] = None  # storage for FSDP compatibility
         self.qzeros_storage: Optional[IntCodes] = None  # storage for FSDP compatibility
         
-        self._quant_method = methods[quant_method]
         self.out_features, self.in_features = None, None
         self.scale_nbits = scale_nbits
         self.straight_through_gradient = straight_through_gradient
@@ -43,16 +136,11 @@ class GPTQQuantizedWeight(nn.Module):
         self.scales.requires_grad = False
 
     def forward(self):
-        dequantized_weight = self._quant_method.dequantize_weight(
+        dequantized_weight = self.dequantize_weight(
             self.get_qweight(), self.get_qzeros(), self.get_scales())
         if self.out_features is None:
             self.out_features, self.in_features = dequantized_weight.shape
         return dequantized_weight
-
-    def estimate_nbits_per_parameter(self) -> float:
-        # TODO
-        """Calculate the effective number of bits per original matrix parameters"""
-        return 4
     
     def wrap_params_for_fsdp_(self, **kwargs):
         """Make this module compatible with FullyShardedDataParallel; modifies state dict in-place"""
@@ -108,7 +196,7 @@ class GPTQQuantizedWeight(nn.Module):
         prev_qzeros = self.get_qzeros().clone()
         scales = self.get_scales().clone()
         
-        qweight, qzeros = self._quant_method.update_discretes(
+        qweight, qzeros = self.update_qweight_qzeros(
             prev_qweight, prev_qzeros, scales, reference_weight, max_update_fraction, lr)
 
         self.set_qweight(qweight)
@@ -127,3 +215,53 @@ class GPTQQuantizedWeight(nn.Module):
         qzeros = self.qzeros if self.qzeros is not None else self.qzeros_storage()
         qzeros.copy_(new_qzeros, **kwargs)
 
+    def dequantize_weight(self, qweight, qzeros, scales):
+        unpacked_qweight, unpacked_qzeros = unpack_4bit_to_32bit_signed(qweight, qzeros)
+        group_size = unpacked_qweight.shape[0] // scales.shape[0]
+        scales = scales.repeat_interleave(group_size, dim=0)
+        unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
+        unpacked_qweight = (unpacked_qweight - unpacked_qzeros) * scales
+        return unpacked_qweight.T
+
+    def update_qweight_qzeros(self, prev_qweight, prev_qzeros, new_scales, reference_weight, max_update_fraction, lr):
+        unpacked_qweight, unpacked_qzeros = unpack_4bit_to_32bit_signed(prev_qweight, prev_qzeros)
+        group_size = unpacked_qweight.shape[0] // new_scales.shape[0]
+        scales = new_scales.repeat_interleave(group_size, dim=0)
+        unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
+        qweight_grad = reference_weight.grad.T * scales
+        qzeros_grad = -reference_weight.grad.T * scales
+
+        """Update only topk
+        qweight = unpacked_qweight - lr * qweight_grad
+        qzeros = unpacked_qzeros - lr * qzeros_grad
+        """
+        in_group_size, out_group_size = group_size, 1   # for GPTQ
+        flat_indices_to_update = get_discrete_group_indices(
+            reference_weight, out_group_size, in_group_size, max_update_fraction)
+        
+        def _update_discrete_param(group_indices, targeted_tensor, targeted_tensor_grad):
+            num_groups = reference_weight.shape[1] // group_size
+
+            # Calculate row and group positions in w
+            row_indices = group_indices // num_groups
+            group_positions = group_indices % num_groups
+
+            # Calculate the start and end positions in q
+            start_cols = group_positions * group_size
+            end_cols = start_cols + group_size
+
+            for row, start_col, end_col in zip(row_indices, start_cols, end_cols):
+                targeted_tensor[start_col:end_col, row] = targeted_tensor[start_col:end_col, row] - lr * targeted_tensor_grad[start_col:end_col, row]
+            
+            return targeted_tensor
+        
+
+        qweight = _update_discrete_param(flat_indices_to_update, unpacked_qweight.clone().float(), qweight_grad).round().int()
+        qzeros = _update_discrete_param(flat_indices_to_update, unpacked_qzeros.clone().float(), qzeros_grad).round().int()
+
+        qweight, qzeros = pack_32bit_to_4bit(qweight, qzeros)
+        qzeros = undo_repeat_interleave(qzeros, group_size, dim=0)
+
+        assert qweight.shape == prev_qweight.shape
+        assert qzeros.shape == prev_qzeros.shape
+        return qweight, qzeros

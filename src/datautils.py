@@ -19,6 +19,20 @@ def set_seed(seed: Optional[int]):
     torch.random.manual_seed(seed)
 
 
+def mmlu_preprocess(example):
+    example = example['train']
+    return {"messages": [
+        {
+            'role': 'user', 
+            'content': example['question'] + ' ' + '\t'.join(example['choices'])
+        },
+        {
+            "role": "assistant",
+            'content': example['choices'][example['answer']]
+        }
+    ]}
+
+
 def reformat_mmlu(entry):
     # Extract relevant data from the original entry
     entry = entry['train']

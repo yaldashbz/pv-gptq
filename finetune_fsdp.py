@@ -31,9 +31,9 @@ from src.pv_utils import infer_module_classes, create_dequantized_gptq_model, \
     get_original_named_parameters_from_fsdp_module, split_quantized_weights_between_ranks, \
     YourQuantizedWeightIsInAnotherRank
 from src.pv_optimizer import StraightThroughAdamW
-from src.datautils import reformat_mmlu
+from src.datautils import reformat_mmlu, mmlu_preprocess
 
-from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
+from auto_gptq import AutoGPTQForCausalLM
 
 try:
     import wandb
@@ -403,6 +403,8 @@ def prepare_training_dataset(args: argparse.Namespace, tokenizer: transformers.P
     if os.path.exists(args.dataset_name):
         dataset = datasets.load_from_disk(args.dataset_name)
     else:
+        def preprocess(example):
+            return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
         if args.dataset_name == 'HuggingFaceTB/cosmopedia' and args.dataset_config_name == 'all':
             dataset = get_all_cosmopedia_dataset(args)
         else:
@@ -416,7 +418,8 @@ def prepare_training_dataset(args: argparse.Namespace, tokenizer: transformers.P
                 streaming=False,
             )
             if args.dataset_name == 'cais/mmlu':
-                dataset = Dataset.from_list([reformat_mmlu(entry) for entry in dataset])
+                dataset = dataset.map(mmlu_preprocess)
+                dataset = dataset.map(preprocess)
 
     def is_tokenized(dataset):
         return 'input_ids' in dataset.column_names
@@ -465,7 +468,7 @@ def load_base_model(args: argparse.Namespace, device: torch.device, is_fsdp: boo
     #     args.base_model, load_quantized=None, dtype=args.load_dtype, trust_remote_code=args.trust_remote_code,
     #     attn_implementation=args.attn_implementation,
     # ).to(dtype=args.load_dtype if args.load_dtype != 'auto' else None)
-    base_model = AutoModelForCausalLM.from_pretrained(args.base_model)
+    base_model = AutoModelForCausalLM.from_pretrained(args.base_model, device_map=device)
     base_model.train(False)
     for param in base_model.parameters():
         param.requires_grad = False
@@ -498,6 +501,12 @@ def load_dequantized_model(args: argparse.Namespace, device: torch.device, is_fs
     #     ).to(args.master_dtype)
 
     quantized_model = AutoGPTQForCausalLM.from_quantized(args.quantized_model, device=device)
+    # for nf4
+    # for name, param in quantized_model.named_parameters():
+    #     if 'bias' in name:
+    #         with torch.no_grad():
+    #             param.zero_()
+    #         print(f"Bias {name} has been set to zero.")
 
     quantized_model.config.use_cache = False
     quantized_model.train(True)  # note: HF gradient checkpoints do not work for some models without train(True); see

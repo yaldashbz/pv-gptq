@@ -2,62 +2,6 @@ import torch
 import math
 
 
-class QuantLinear:
-    @staticmethod
-    def dequantize_weight(qweight, qzeros, scales):
-        unpacked_qweight, unpacked_qzeros = unpack_4bit_to_32bit_signed(qweight, qzeros)
-        group_size = unpacked_qweight.shape[0] // scales.shape[0]
-        scales = scales.repeat_interleave(group_size, dim=0)
-        unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
-        unpacked_qweight = (unpacked_qweight - unpacked_qzeros) * scales
-        return unpacked_qweight.T
-
-
-    @staticmethod
-    def update_discretes(prev_qweight, prev_qzeros, new_scales, reference_weight, max_update_fraction, lr):
-        unpacked_qweight, unpacked_qzeros = unpack_4bit_to_32bit_signed(prev_qweight, prev_qzeros)
-        group_size = unpacked_qweight.shape[0] // new_scales.shape[0]
-        scales = new_scales.repeat_interleave(group_size, dim=0)
-        unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
-        qweight_grad = reference_weight.grad.T * scales
-        qzeros_grad = -reference_weight.grad.T * scales
-
-        """Update only topk
-        qweight = unpacked_qweight - lr * qweight_grad
-        qzeros = unpacked_qzeros - lr * qzeros_grad
-        """
-        in_group_size, out_group_size = group_size, 1   # for GPTQ
-        flat_indices_to_update = get_discrete_group_indices(
-            reference_weight, out_group_size, in_group_size, max_update_fraction)
-        
-        def _update_discrete_param(group_indices, targeted_tensor, targeted_tensor_grad):
-            num_groups = reference_weight.shape[1] // group_size
-
-            # Calculate row and group positions in w
-            row_indices = group_indices // num_groups
-            group_positions = group_indices % num_groups
-
-            # Calculate the start and end positions in q
-            start_cols = group_positions * group_size
-            end_cols = start_cols + group_size
-
-            for row, start_col, end_col in zip(row_indices, start_cols, end_cols):
-                targeted_tensor[start_col:end_col, row] = targeted_tensor[start_col:end_col, row] - lr * targeted_tensor_grad[start_col:end_col, row]
-            
-            return targeted_tensor
-        
-
-        qweight = _update_discrete_param(flat_indices_to_update, unpacked_qweight.clone().float(), qweight_grad).round().int()
-        qzeros = _update_discrete_param(flat_indices_to_update, unpacked_qzeros.clone().float(), qzeros_grad).round().int()
-
-        qweight, qzeros = pack_32bit_to_4bit(qweight, qzeros)
-        qzeros = undo_repeat_interleave(qzeros, group_size, dim=0)
-
-        assert qweight.shape == prev_qweight.shape
-        assert qzeros.shape == prev_qzeros.shape
-        return qweight, qzeros
-
-
 def get_discrete_group_indices(
         reference_weight: torch.Tensor, 
         out_group_size: int,

@@ -9,7 +9,7 @@ from src.gptq_ops import QuantLinear, groupwise_squared_norms, get_discrete_grou
 from src.aq_ops import IntCodes
 
 class TestQuantLinear(unittest.TestCase):
-    method = QuantLinear
+    method = QuantLinear()
 
     def test_discrete_group_update(self):
         reference_weight = torch.ones(3,6)

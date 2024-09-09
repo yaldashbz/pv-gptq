@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=layernorm-llama3.1-pajama-static
-#SBATCH --output=../layernorm-llama3.1-pajama-1e-4.out
-#SBATCH --error=../layernorm-llama3.1-pajama-1e-4.err
+#SBATCH --job-name=mainx2mmlu
+#SBATCH --output=../sbatch-logs/mainx2mmlu.out
+#SBATCH --error=../sbatch-logs/mainx2mmlu.err
 
 #number of CPUs to be used
 #SBATCH --ntasks=1
@@ -21,12 +21,13 @@
 
 
 # Llama-3.1-8B
-export NAME='Meta-Llama-3.1-8B-Instruct-gptq4-128-True-seed1_mse_static'
+export NAME='Meta-Llama-3.1-8B-Instruct-gptq4-128-True-seed1_auxmmlu_gptqv2'
+# export NAME='Meta-Llama-3.1-8B-Instruct-gptq4-128-True-seed1_mse_static'
 export SEQLEN=8192
-export SAVE_NAME=$NAME\_test_p_1e-4_pajama_$SEQLEN
+export SAVE_NAME=$NAME\_1e-4_mmlu_$SEQLEN
 export MODEL_PATH=meta-llama/Meta-Llama-3.1-8B-Instruct
-export QUANTIZED_MODEL_PATH=/nfs/scistore19/alistgrp/amoeini/saved/$NAME # path to the model created by initial calibration
-export TOKENIZED_DATASET_PATH=/nfs/scistore19/alistgrp/yshabanz/data/pajama_tokenized_llama3.1-8b-instruct_$SEQLEN  # yet again, red pajama adviced
+export QUANTIZED_MODEL_PATH=/nfs/scistore19/alistgrp/yshabanz/saved/$NAME # path to the model created by initial calibration
+export TOKENIZED_DATASET_PATH=/nfs/scistore19/alistgrp/yshabanz/data/mmluaux_tokenized_llama3.1-8b-instruct_$SEQLEN  # yet again, red pajama adviced
 export CACHE_DIR=/nfs/scistore19/alistgrp/yshabanz/cache_dir
 export SNAPSHOT_PATH=/nfs/scistore19/alistgrp/yshabanz/saved/$SAVE_NAME
 export NUM_GPUS=8

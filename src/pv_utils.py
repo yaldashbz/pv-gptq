@@ -40,14 +40,20 @@ def create_dequantized_gptq_model(
     master_parameters = dict()
     all_quantized_weight_parameters = set()
 
+    quant_class, quant_name = GPTQQuantizedWeight.get_quant_class(model)
+
     for name, module in model.named_modules():
-        if 'qlinear' in module.__module__:
+        if quant_name in str(module.__class__):
             assert module not in master_parameters and id(module) not in memo, f"{name} is converted more than once"
-            quantized_weight = GPTQQuantizedWeight(module)
+            quantized_weight = GPTQQuantizedWeight.create_quantized_weight(quant_class, module)
             quantized_weight.wrap_params_for_fsdp_()
 
+            infeatures, outfeatures = quantized_weight.in_features, quantized_weight.out_features
+            if infeatures is None:
+                infeatures, outfeatures = module.infeatures, module.outfeatures
+
             dequantized_module = nn.Linear(
-                module.infeatures, module.outfeatures, bias=module.bias is not None,
+                infeatures, outfeatures, bias=module.bias is not None,
                 dtype=dequantized_dtype
             )
             with torch.no_grad():
